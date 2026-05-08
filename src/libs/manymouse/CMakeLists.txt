@@ -1,9 +1,9 @@
 
 if (C_MANYMOUSE)
 
-  add_library(libmanymouse STATIC)
-  target_link_libraries(libmanymouse PRIVATE project_headers)
-  target_sources(libmanymouse PRIVATE
+  add_library(manymouse STATIC)
+  target_link_libraries(manymouse PRIVATE project_headers)
+  target_sources(manymouse PRIVATE
     linux_evdev.c
     macosx_hidmanager.c
     macosx_hidutilities.c
