@@ -579,6 +579,7 @@ target_link_libraries(dosbox PRIVATE
   libdosboxcommon
   $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>
   $<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>
+  $<$<BOOL:${SUPPORT_XINPUT2}>:${X11_Xinput_LIB}>
 )
 
 # Export dynamic symbols so loguru's stack traces can resolve names
