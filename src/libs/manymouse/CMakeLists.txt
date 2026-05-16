@@ -13,4 +13,6 @@ if (C_MANYMOUSE)
     x11_xinput2.c
   )
 
+
+  disable_warnings(manymouse)
 endif()
