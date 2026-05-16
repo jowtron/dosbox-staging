@@ -1,3 +1,7 @@
+// TEST: triggers -Wsign-compare; should be suppressed by SYSTEM includes
+static inline int _test_system_simpleini() {
+    unsigned u = 1; int s = -1; return u > s;
+}
 /** @mainpage
 
     <table>
