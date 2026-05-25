@@ -5,7 +5,7 @@
 // millisecond
 
 #include "private/pcspeaker_discrete.h"
-#include "private/pcspeaker_impulse.h"
+#include "private/pcspeaker_impulse_new.h"
 
 #include "utils/math_utils.h"
 

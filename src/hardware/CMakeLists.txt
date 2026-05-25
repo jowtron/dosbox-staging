@@ -13,7 +13,8 @@ target_sources(dosboxcommon PRIVATE
   audio/opl.cpp
   audio/pcspeaker.cpp
   audio/pcspeaker_discrete.cpp
-  audio/pcspeaker_impulse.cpp
+  audio/pcspeaker_impulse_new.cpp
+  audio/pcspeaker_pit.cpp
   audio/ps1audio.cpp
   audio/soundblaster.cpp
   audio/speaker.cpp

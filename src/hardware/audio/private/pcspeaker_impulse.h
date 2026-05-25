@@ -16,10 +16,10 @@
 #include "hardware/port.h"
 #include "misc/support.h"
 
-class PcSpeakerImpulse final : public PcSpeaker {
+class PcSpeakerImpulseOld final : public PcSpeaker {
 public:
-	PcSpeakerImpulse();
-	~PcSpeakerImpulse() override;
+	PcSpeakerImpulseOld();
+	~PcSpeakerImpulseOld() override;
 
 	void SetFilterState(const FilterState filter_state) override;
 	bool TryParseAndSetCustomFilter(const std::string& filter_choice) override;
@@ -37,7 +37,7 @@ private:
 
 	// Constants
 	static constexpr auto device_name = ChannelName::PcSpeaker;
-	static constexpr auto model_name  = "impulse";
+	static constexpr auto model_name  = "impulse_old";
 
 	// Amplitude constants
 
@@ -104,6 +104,5 @@ private:
 
 	int tally_of_silence = 0;
 };
-
 
 #endif // DOSBOX_PCSPEAKER_IMPULSE_H

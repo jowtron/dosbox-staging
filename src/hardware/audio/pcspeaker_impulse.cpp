@@ -16,14 +16,14 @@ CHECK_NARROWING();
 // Comment out the following to use the reference implementation.
 #define USE_LOOKUP_TABLES 1
 
-void PcSpeakerImpulse::AddPITOutput(const float index)
+void PcSpeakerImpulseOld::AddPITOutput(const float index)
 {
 	if (prev_port_b.speaker_output) {
 		AddImpulse(index, pit.amplitude);
 	}
 }
 
-void PcSpeakerImpulse::ForwardPIT(const float new_index)
+void PcSpeakerImpulseOld::ForwardPIT(const float new_index)
 {
 	auto passed = new_index - pit.last_index;
 
@@ -166,7 +166,7 @@ void PcSpeakerImpulse::ForwardPIT(const float new_index)
 	}
 }
 
-void PcSpeakerImpulse::SetPITControl(const PitMode pit_mode)
+void PcSpeakerImpulseOld::SetPITControl(const PitMode pit_mode)
 {
 	const auto new_index = static_cast<float>(PIC_TickIndex());
 	ForwardPIT(new_index);
@@ -196,7 +196,7 @@ void PcSpeakerImpulse::SetPITControl(const PitMode pit_mode)
 	AddPITOutput(new_index);
 }
 
-void PcSpeakerImpulse::SetCounter(const int cntr, const PitMode pit_mode)
+void PcSpeakerImpulseOld::SetCounter(const int cntr, const PitMode pit_mode)
 {
 #ifdef SPKR_DEBUGGING
 	LOG_INFO("PCSPEAKER: %f counter: %u, mode: %s", PIC_FullIndex(), cntr, pit_mode_to_string(pit_mode));
@@ -280,7 +280,7 @@ void PcSpeakerImpulse::SetCounter(const int cntr, const PitMode pit_mode)
 	pit.mode = pit_mode;
 }
 
-void PcSpeakerImpulse::SetType(const PpiPortB &port_b)
+void PcSpeakerImpulseOld::SetType(const PpiPortB& port_b)
 {
 #ifdef SPKR_DEBUGGING
 	LOG_INFO("PCSPEAKER: %f output: %s, clock gate %s",
@@ -360,7 +360,7 @@ static double sinc(const double t)
 	return result;
 }
 
-float PcSpeakerImpulse::CalcImpulse(const double t) const
+float PcSpeakerImpulseOld::CalcImpulse(const double t) const
 {
 	// raised-cosine-windowed sinc function
 	const double fs = sample_rate_hz;
@@ -374,7 +374,7 @@ float PcSpeakerImpulse::CalcImpulse(const double t) const
 		return 0.0f;
 }
 
-void PcSpeakerImpulse::AddImpulse(float index, const int16_t amplitude)
+void PcSpeakerImpulseOld::AddImpulse(float index, const int16_t amplitude)
 {
 	if (channel->WakeUp())
 		pit.prev_amplitude = neutral_amplitude;
@@ -418,7 +418,7 @@ void PcSpeakerImpulse::AddImpulse(float index, const int16_t amplitude)
 }
 #endif
 
-void PcSpeakerImpulse::PicCallback(const int requested_frames)
+void PcSpeakerImpulseOld::PicCallback(const int requested_frames)
 {
 	ForwardPIT(1.0f);
 	pit.last_index = 0;
@@ -457,7 +457,7 @@ void PcSpeakerImpulse::PicCallback(const int requested_frames)
 	}
 }
 
-void PcSpeakerImpulse::InitializeImpulseLUT()
+void PcSpeakerImpulseOld::InitializeImpulseLUT()
 {
 	assert(impulse_lut.size() == sinc_filter_width);
 
@@ -467,7 +467,7 @@ void PcSpeakerImpulse::InitializeImpulseLUT()
 	}
 }
 
-void PcSpeakerImpulse::SetFilterState(const FilterState filter_state)
+void PcSpeakerImpulseOld::SetFilterState(const FilterState filter_state)
 {
 	assert(channel);
 
@@ -493,13 +493,13 @@ void PcSpeakerImpulse::SetFilterState(const FilterState filter_state)
 	}
 }
 
-bool PcSpeakerImpulse::TryParseAndSetCustomFilter(const std::string& filter_choice)
+bool PcSpeakerImpulseOld::TryParseAndSetCustomFilter(const std::string& filter_choice)
 {
 	assert(channel);
 	return channel->TryParseAndSetCustomFilter(filter_choice);
 }
 
-PcSpeakerImpulse::PcSpeakerImpulse()
+PcSpeakerImpulseOld::PcSpeakerImpulseOld()
 {
 	// The implementation is tuned to working with sample rates that are
 	// multiples of 8000, such as 8 Khz, 16 Khz, or 32 Khz. Anything besides
@@ -518,9 +518,10 @@ PcSpeakerImpulse::PcSpeakerImpulse()
 	constexpr bool Stereo = false;
 	constexpr bool SignedData = true;
 	constexpr bool NativeOrder = true;
-	const auto callback = std::bind(MIXER_PullFromQueueCallback<PcSpeakerImpulse, float, Stereo, SignedData, NativeOrder>,
-	                                std::placeholders::_1,
-	                                this);
+	const auto callback        = std::bind(
+	        MIXER_PullFromQueueCallback<PcSpeakerImpulseOld, float, Stereo, SignedData, NativeOrder>,
+	        std::placeholders::_1,
+	        this);
 
 	channel = MIXER_AddChannel(callback,
 	                           sample_rate_hz,
@@ -536,7 +537,7 @@ PcSpeakerImpulse::PcSpeakerImpulse()
 	channel->SetPeakAmplitude(positive_amplitude);
 }
 
-PcSpeakerImpulse::~PcSpeakerImpulse()
+PcSpeakerImpulseOld::~PcSpeakerImpulseOld()
 {
 	LOG_MSG("%s: Shutting down %s model", device_name, model_name);
 
