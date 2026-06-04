@@ -29,13 +29,21 @@ float PcSpeakerImpulse::CalcImpulse(const double t) const
 	constexpr double fs = sample_rate_hz;
 	constexpr double fc = fs / (2.0 + cutoff_margin);
 	constexpr double q  = static_cast<double>(sinc_filter_quality);
-	float res           = 0.0f;
+
+	// The model integrates these impulses, so the integrated step height is
+	// proportional to the sum of the taps, which grows with the sample rate
+	// (more taps span the same fixed-duration window). Normalise by the
+	// reference rate so the step height (output loudness) matches
+	// the original 32 kHz model.
+	constexpr double gain = reference_sample_rate_hz / fs;
+
+	float res = 0.0f;
 
 	if ((0 < t) && (t * fs < q)) {
 		constexpr auto midpoint = q / (2.0 * fs);
 		const auto window = 1.0 +
 		                    std::cos(2.0 * fs * M_PI * (midpoint - t) / q);
-		const auto amplitude = window *
+		const auto amplitude = gain * window *
 		                       sinc(2.0 * fc * M_PI * (t - midpoint)) / 2.0;
 		res = static_cast<float>(amplitude);
 	}
