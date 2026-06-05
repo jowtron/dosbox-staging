@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText:  2025 The DOSBox Staging Team
+// SPDX-FileCopyrightText:  2025-2026 The DOSBox Staging Team
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "private/pcspeaker_pit.h"
@@ -9,13 +9,14 @@
 
 CHECK_NARROWING();
 
-void PitCounter::Emit(const bool hi, const float time_ms, std::vector<Transition>& out)
+void PitCounter::Emit(const OutputState state, const float offset_ms,
+                      std::vector<Transition>& out)
 {
-	if (hi == output_high) {
+	if (state == output_state) {
 		return;
 	}
-	output_high = hi;
-	out.emplace_back(Transition{time_ms, hi});
+	output_state = state;
+	out.emplace_back(Transition{offset_ms, state});
 }
 
 // Intel 8254 / 82C54 datasheet, mode definitions:
@@ -37,10 +38,10 @@ void PitCounter::Emit(const bool hi, const float time_ms, std::vector<Transition
 void PitCounter::Invalidate()
 {
 	// Like a gate-low event: mode 3 forces output HIGH when counting stops.
-	// Without this, output_high is frozen mid-cycle (often LOW), which
+	// Without this, output_state is frozen mid-cycle (often LOW), which
 	// causes AddImpulse to drop the next rising edge via deduplication.
 	if (mode3_active) {
-		output_high = true;
+		output_state = OutputState::High;
 	}
 	mode3_active       = false;
 	mode3_retain_phase = true;
@@ -66,13 +67,13 @@ std::vector<PitCounter::Transition> PitCounter::WriteControl(const PitMode new_m
 	switch (mode) {
 	case PitMode::InterruptOnTerminalCount:
 		// Output goes LOW immediately on control word write
-		Emit(false, 0.0f, out);
+		Emit(OutputState::Low, 0.0f, out);
 		break;
 
 	case PitMode::OneShot:
 	case PitMode::HardwareStrobe:
 		// Output goes HIGH immediately; count load arms the trigger
-		Emit(true, 0.0f, out);
+		Emit(OutputState::High, 0.0f, out);
 		mode1_awaiting_count   = true;
 		mode1_awaiting_trigger = false;
 		break;
@@ -81,7 +82,7 @@ std::vector<PitCounter::Transition> PitCounter::WriteControl(const PitMode new_m
 	case PitMode::SquareWave:
 	case PitMode::SoftwareStrobe:
 		// Output goes HIGH immediately
-		Emit(true, 0.0f, out);
+		Emit(OutputState::High, 0.0f, out);
 		mode3_active       = false;
 		mode3_retain_phase = false;
 		break;
@@ -98,13 +99,13 @@ std::vector<PitCounter::Transition> PitCounter::WriteCount(const int count)
 
 	// Per 8254 spec (Figure 22): count 0 is equivalent to 65536 (2^16)
 	const int effective_count = (count == 0) ? 0x10000 : count;
-	const auto duration_ms = ms_per_tick * static_cast<float>(effective_count);
+	const auto duration_ms = MsPerTick * static_cast<float>(effective_count);
 
 	switch (mode) {
 	case PitMode::InterruptOnTerminalCount:
 		// Per 8254: after TC, a new count write forces output LOW again.
-		if (output_high) {
-			Emit(false, 0.0f, out);
+		if (output_state == OutputState::High) {
+			Emit(OutputState::Low, 0.0f, out);
 		}
 		phase_ms  = 0.0f;
 		period_ms = duration_ms;
@@ -130,11 +131,11 @@ std::vector<PitCounter::Transition> PitCounter::WriteCount(const int count)
 		new_period_ms = duration_ms;
 		if (!counting) {
 			period_ms = new_period_ms;
-			half_ms   = std::max(period_ms - ms_per_tick, 0.0f);
+			half_ms   = std::max(period_ms - MsPerTick, 0.0f);
 			if (gate) {
 				phase_ms = 0.0f;
 				counting = true;
-				Emit(true, 0.0f, out);
+				Emit(OutputState::High, 0.0f, out);
 			}
 		}
 		// If already counting, new period takes effect at the next
@@ -144,14 +145,14 @@ std::vector<PitCounter::Transition> PitCounter::WriteCount(const int count)
 
 	case PitMode::SquareWave:
 		new_period_ms = duration_ms;
-		new_half_ms = ms_per_tick * static_cast<float>((count + 1) / 2);
+		new_half_ms   = MsPerTick * static_cast<float>((count + 1) / 2);
 		if (!mode3_active) {
 			period_ms = new_period_ms;
 			half_ms   = new_half_ms;
 			if (gate) {
 				if (!mode3_retain_phase) {
 					phase_ms = 0.0f;
-					Emit(true, 0.0f, out);
+					Emit(OutputState::High, 0.0f, out);
 				}
 				mode3_active       = true;
 				mode3_retain_phase = false;
@@ -165,7 +166,7 @@ std::vector<PitCounter::Transition> PitCounter::WriteCount(const int count)
 	return out;
 }
 
-std::vector<PitCounter::Transition> PitCounter::SetGate(const bool new_gate)
+std::vector<PitCounter::Transition> PitCounter::EnableGate(const bool new_gate)
 {
 	std::vector<Transition> out;
 	const bool rising  = !gate && new_gate;
@@ -189,13 +190,13 @@ std::vector<PitCounter::Transition> PitCounter::SetGate(const bool new_gate)
 			phase_ms  = 0.0f;
 			period_ms = mode1_pending_ms;
 			counting  = true;
-			Emit(false, 0.0f, out);
+			Emit(OutputState::Low, 0.0f, out);
 		} else if (rising && mode1_awaiting_trigger) {
 			phase_ms               = 0.0f;
 			period_ms              = mode1_pending_ms;
 			mode1_awaiting_trigger = false;
 			counting               = true;
-			Emit(false, 0.0f, out);
+			Emit(OutputState::Low, 0.0f, out);
 		}
 		// Gate falling has no effect once counting
 		break;
@@ -220,15 +221,15 @@ std::vector<PitCounter::Transition> PitCounter::SetGate(const bool new_gate)
 		if (falling) {
 			// Gate low forces output HIGH and freezes count
 			counting = false;
-			Emit(true, 0.0f, out);
+			Emit(OutputState::High, 0.0f, out);
 		} else if (rising) {
 			// Gate rising restarts from the beginning of the
 			// period; pick up any count written while gate was low.
 			phase_ms  = 0.0f;
 			period_ms = new_period_ms;
-			half_ms   = std::max(period_ms - ms_per_tick, 0.0f);
+			half_ms   = std::max(period_ms - MsPerTick, 0.0f);
 			counting  = true;
-			Emit(true, 0.0f, out);
+			Emit(OutputState::High, 0.0f, out);
 		}
 		break;
 
@@ -236,14 +237,14 @@ std::vector<PitCounter::Transition> PitCounter::SetGate(const bool new_gate)
 		if (falling) {
 			mode3_active       = false;
 			mode3_retain_phase = false;
-			Emit(true, 0.0f, out);
+			Emit(OutputState::High, 0.0f, out);
 		} else if (rising) {
 			phase_ms           = 0.0f;
 			period_ms          = new_period_ms;
 			half_ms            = new_half_ms;
 			mode3_active       = true;
 			mode3_retain_phase = false;
-			Emit(true, 0.0f, out);
+			Emit(OutputState::High, 0.0f, out);
 		}
 		break;
 
@@ -253,42 +254,43 @@ std::vector<PitCounter::Transition> PitCounter::SetGate(const bool new_gate)
 	return out;
 }
 
-void PitCounter::AdvanceCountdown(const float passed, std::vector<Transition>& out)
+void PitCounter::AdvanceCountdown(const float duration_ms,
+                                  std::vector<Transition>& out)
 {
 	// Modes 0 and 1: output goes HIGH once at terminal count and latches.
 	if (!counting) {
 		return;
 	}
-	if (phase_ms + passed >= period_ms) {
+	if (phase_ms + duration_ms >= period_ms) {
 		const auto delay = period_ms - phase_ms;
-		Emit(true, delay, out);
+		Emit(OutputState::High, delay, out);
 		counting = false;
 		phase_ms = period_ms;
 	} else {
-		phase_ms += passed;
+		phase_ms += duration_ms;
 	}
 }
 
-void PitCounter::AdvanceStrobe(const float passed, std::vector<Transition>& out)
+void PitCounter::AdvanceStrobe(const float duration_ms, std::vector<Transition>& out)
 {
 	// Modes 4 and 5: a single one-clock LOW pulse at terminal count, then
 	// the output returns HIGH. Counting stops afterwards either way.
 	if (!counting) {
 		return;
 	}
-	if (phase_ms + passed >= period_ms) {
+	if (phase_ms + duration_ms >= period_ms) {
 		const auto delay = period_ms - phase_ms;
-		Emit(false, delay, out);              // LOW strobe
-		Emit(true, delay + ms_per_tick, out); // return HIGH
+		Emit(OutputState::Low, delay, out);              // LOW strobe
+		Emit(OutputState::High, delay + MsPerTick, out); // return HIGH
 		counting = false;
 		phase_ms = period_ms;
 	} else {
-		phase_ms += passed;
+		phase_ms += duration_ms;
 	}
 }
 
-void PitCounter::AdvanceOscillator(float passed, std::vector<Transition>& out,
-                                   const bool square)
+void PitCounter::AdvanceOscillator(float duration_ms,
+                                   std::vector<Transition>& out, const bool square)
 {
 	// Modes 2 (rate generator) and 3 (square wave) share the same two-phase
 	// structure: a HIGH segment of half_ms followed by a LOW segment until
@@ -303,38 +305,38 @@ void PitCounter::AdvanceOscillator(float passed, std::vector<Transition>& out,
 	}
 
 	auto time_base = 0.0f;
-	while (passed > 0.0f) {
+	while (duration_ms > 0.0f) {
 		if (phase_ms >= half_ms) {
 			// LOW segment, ending at the full-period boundary
-			if (phase_ms + passed >= period_ms) {
+			if (phase_ms + duration_ms >= period_ms) {
 				const auto delay = period_ms - phase_ms;
 				time_base += delay;
-				passed -= delay;
+				duration_ms -= delay;
 				phase_ms  = 0.0f;
 				period_ms = new_period_ms;
-				half_ms   = square ? new_half_ms
-				                   : std::max(period_ms - ms_per_tick,
-				                              0.0f);
-				Emit(true, time_base, out); // go HIGH
+				half_ms = square ? new_half_ms
+				                 : std::max(period_ms - MsPerTick,
+				                            0.0f);
+				Emit(OutputState::High, time_base, out); // go HIGH
 			} else {
-				phase_ms += passed;
-				passed = 0.0f;
+				phase_ms += duration_ms;
+				duration_ms = 0.0f;
 			}
 		} else {
 			// HIGH segment, ending at the half-period boundary
-			if (phase_ms + passed >= half_ms) {
+			if (phase_ms + duration_ms >= half_ms) {
 				const auto delay = half_ms - phase_ms;
 				time_base += delay;
-				passed -= delay;
+				duration_ms -= delay;
 				phase_ms = half_ms;
 				if (square) {
 					period_ms = new_period_ms;
 					half_ms   = new_half_ms;
 				}
-				Emit(false, time_base, out); // go LOW
+				Emit(OutputState::Low, time_base, out); // go LOW
 			} else {
-				phase_ms += passed;
-				passed = 0.0f;
+				phase_ms += duration_ms;
+				duration_ms = 0.0f;
 			}
 		}
 	}

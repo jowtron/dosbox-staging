@@ -207,7 +207,7 @@ void PcSpeakerDiscrete::SetPITControl(const PitMode /*pit_mode*/)
 	pit_last      = 0;
 	pit_mode      = PitMode::InterruptOnTerminalCount;
 
-	(void)channel->WakeUp();
+	channel->WakeUp();
 }
 
 // PIT-mode activation

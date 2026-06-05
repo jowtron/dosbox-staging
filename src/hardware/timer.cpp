@@ -145,17 +145,17 @@ const char* pit_mode_to_string(const PitMode mode)
 
 // The maximum decimal count can go beyond 16-bit, beacuse a
 // count of zero was used to represent 65536 ticks.
-constexpr int32_t max_bcd_count = 9999;
-constexpr int32_t max_dec_count = 0x10000;
+constexpr int32_t MaxBcdCount = 9999;
+constexpr int32_t MaxDecCount = 0x10000;
 
 // A programmed count of 0 represents one more tick than the max representable
 // value: 65536 in binary mode, 10000 in BCD mode.
 // Ref: https://wiki.osdev.org/Programmable_Interval_Timer
-constexpr int32_t zero_bcd_count    = max_bcd_count + 1;
-constexpr int32_t zero_binary_count = max_dec_count;
+constexpr int32_t ZeroBcdCount    = MaxBcdCount + 1;
+constexpr int32_t ZeroBinaryCount = MaxDecCount;
 constexpr int32_t get_zero_count_ticks(const PIT_Block& channel)
 {
-	return channel.bcd ? zero_bcd_count : zero_binary_count;
+	return channel.bcd ? ZeroBcdCount : ZeroBinaryCount;
 }
 
 constexpr int update_channel_delay(PIT_Block& channel)
@@ -298,12 +298,11 @@ static void counter_latch(PIT_Block& channel)
 			if (channel.bcd) {
 				elapsed_ms = fmod(elapsed_ms,
 				                  period_of_1k_pit_ticks * 10000.0);
-				save_read_latch(max_bcd_count -
+				save_read_latch(MaxBcdCount -
 				                elapsed_ms * PIT_TICK_RATE_KHZ);
 			} else {
 				elapsed_ms = fmod(elapsed_ms,
-				                  period_of_1k_pit_ticks *
-				                          max_dec_count);
+				                  period_of_1k_pit_ticks * MaxDecCount);
 				save_read_latch(0xffff -
 				                elapsed_ms * PIT_TICK_RATE_KHZ);
 			}
@@ -553,7 +552,7 @@ static void latch_single_channel(const uint8_t channel_num, const uint8_t val)
 	counter_latch(channel);
 	channel.bcd = rbs.bcd_state;
 	if (channel.bcd) {
-		channel.count = std::min(channel.count, max_bcd_count);
+		channel.count = std::min(channel.count, MaxBcdCount);
 	}
 
 	// Timer is being reprogrammed, unlock the status
