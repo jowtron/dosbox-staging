@@ -56,6 +56,7 @@
 #include "hardware/network/ne2000.h"
 #include "hardware/pci_bus.h"
 #include "hardware/pic.h"
+#include "hardware/scheduler.h"
 #include "hardware/port.h"
 #include "hardware/serialport/serialport.h"
 #include "hardware/timer.h"
@@ -234,6 +235,11 @@ static Bitu normal_loop()
 	Bits ret;
 
 	while (true) {
+		// Keep Scheduler's clock in lockstep with PIC time. Scheduler
+		// events (VGA scanout, etc.) fire at the same wall-clock
+		// moments they would have under PIC's own queue.
+		Scheduler::AdvanceTo(PIC_FullIndex());
+
 		if (PIC_RunQueue()) {
 			if (WEBSERVER_IsEnabled()) {
 				Webserver::Bridge::Instance().ProcessRequests();

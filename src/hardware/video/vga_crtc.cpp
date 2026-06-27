@@ -9,6 +9,7 @@
 #include "cpu/cpu.h"
 #include "debugger/debugger.h"
 #include "hardware/pic.h"
+#include "hardware/scheduler.h"
 
 void VGA_MapMMIO(void);
 void VGA_UnmapMMIO(void);
@@ -282,7 +283,7 @@ void vga_write_p3d5(io_port_t, io_val_t value, io_width_t)
 				// delay small vde changes a bit to avoid screen
 				// resizing if they are reverted in a short
 				// timeframe
-				PIC_RemoveEvents(VGA_SetupDrawing);
+				Scheduler::RemoveEvents(VGA_SetupDrawing);
 				vga.draw.resizing          = false;
 				vga.crtc.vertical_display_end = val;
 				VGA_StartResizeAfter(150);

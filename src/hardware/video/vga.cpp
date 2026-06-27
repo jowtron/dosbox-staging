@@ -12,6 +12,7 @@
 #include "config/setup.h"
 #include "gui/common.h"
 #include "hardware/pic.h"
+#include "hardware/scheduler.h"
 #include "ints/int10.h"
 #include "misc/logging.h"
 #include "misc/video.h"
@@ -152,7 +153,7 @@ void VGA_StartResizeAfter(const uint16_t delay_ms)
 	if (delay_ms == 0) {
 		VGA_SetupDrawing(0);
 	} else {
-		PIC_AddEvent(VGA_SetupDrawing, delay_ms);
+		Scheduler::AddEvent(VGA_SetupDrawing, delay_ms);
 	}
 }
 

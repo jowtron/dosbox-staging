@@ -16,6 +16,7 @@
 #include "gui/render/render.h"
 #include "gui/render/scaler/scalers.h"
 #include "hardware/pic.h"
+#include "hardware/scheduler.h"
 #include "hardware/video/reelmagic/reelmagic.h"
 #include "ints/int10.h"
 #include "misc/video.h"
@@ -1246,7 +1247,7 @@ static void VGA_DrawSingleLine([[maybe_unused]] uint32_t dummy)
 
 	if (vga.draw.lines_done < vga.draw.lines_total) {
 		// Schedule drawing the next line if we're not at the last line
-		PIC_AddEvent(VGA_DrawSingleLine, vga.draw.delay.per_line_ms);
+		Scheduler::AddEvent(VGA_DrawSingleLine, vga.draw.delay.per_line_ms);
 
 	} else {
 		// We've drawn the full frame, notify the renderer the frame is
@@ -1290,7 +1291,7 @@ static void VGA_DrawEGASingleLine([[maybe_unused]] uint32_t dummy)
 
 	if (vga.draw.lines_done < vga.draw.lines_total) {
 		// Schedule drawing the next line if we're not at the last line
-		PIC_AddEvent(VGA_DrawEGASingleLine, vga.draw.delay.per_line_ms);
+		Scheduler::AddEvent(VGA_DrawEGASingleLine, vga.draw.delay.per_line_ms);
 
 	} else {
 		// We've drawn the full frame, notify the renderer the frame is
@@ -1321,11 +1322,11 @@ static void VGA_DrawPart(uint32_t lines)
 
 	if (--vga.draw.parts_left) {
 		// Schedule drawing the next part if we're not at the last part
-		PIC_AddEvent(VGA_DrawPart,
-		             vga.draw.delay.parts,
-		             (vga.draw.parts_left != 1)
-		                     ? vga.draw.parts_lines
-		                     : (vga.draw.lines_total - vga.draw.lines_done));
+		Scheduler::AddEvent(VGA_DrawPart,
+		                    vga.draw.delay.parts,
+		                    (vga.draw.parts_left != 1)
+		                            ? vga.draw.parts_lines
+		                            : (vga.draw.lines_total - vga.draw.lines_done));
 	} else {
 		RENDER_EndUpdate(false);
 	}
@@ -1388,15 +1389,15 @@ static void VGA_PanningLatch(uint32_t /*val*/)
 static void VGA_VerticalTimer(uint32_t /*val*/)
 {
 	vga.draw.delay.framestart = PIC_FullIndex();
-	PIC_AddEvent(VGA_VerticalTimer, vga.draw.delay.vtotal);
+	Scheduler::AddEvent(VGA_VerticalTimer, vga.draw.delay.vtotal);
 
 	switch (machine) {
 	case MachineType::Pcjr:
 	case MachineType::Tandy:
 		// PCJr: Vsync is directly connected to the IRQ controller
 		// Some earlier Tandy models are said to have a vsync interrupt too
-		PIC_AddEvent(VGA_Other_VertInterrupt, vga.draw.delay.vrstart, 1);
-		PIC_AddEvent(VGA_Other_VertInterrupt, vga.draw.delay.vrend, 0);
+		Scheduler::AddEvent(VGA_Other_VertInterrupt, vga.draw.delay.vrstart, 1);
+		Scheduler::AddEvent(VGA_Other_VertInterrupt, vga.draw.delay.vrend, 0);
 		[[fallthrough]];
 
 	case MachineType::Hercules:
@@ -1409,18 +1410,18 @@ static void VGA_VerticalTimer(uint32_t /*val*/)
 		break;
 
 	case MachineType::Vga:
-		PIC_AddEvent(VGA_DisplayStartLatch, vga.draw.delay.vrstart);
-		PIC_AddEvent(VGA_PanningLatch, vga.draw.delay.vrend);
+		Scheduler::AddEvent(VGA_DisplayStartLatch, vga.draw.delay.vrstart);
+		Scheduler::AddEvent(VGA_PanningLatch, vga.draw.delay.vrend);
 		// EGA: 82c435 datasheet: interrupt happens at display end
 		// VGA: checked with scope; however disabled by default by
 		// jumper on VGA boards add a little amount of time to make sure
 		// the last drawpart has already fired
-		PIC_AddEvent(VGA_VertInterrupt, vga.draw.delay.vdend + 0.005);
+		Scheduler::AddEvent(VGA_VertInterrupt, vga.draw.delay.vdend + 0.005);
 		break;
 
 	case MachineType::Ega:
-		PIC_AddEvent(VGA_DisplayStartLatch, vga.draw.delay.vrend);
-		PIC_AddEvent(VGA_VertInterrupt, vga.draw.delay.vdend + 0.005);
+		Scheduler::AddEvent(VGA_DisplayStartLatch, vga.draw.delay.vrend);
+		Scheduler::AddEvent(VGA_VertInterrupt, vga.draw.delay.vdend + 0.005);
 		break;
 
 	default:
@@ -1573,16 +1574,16 @@ static void VGA_VerticalTimer(uint32_t /*val*/)
 		if (vga.draw.parts_left) {
 			LOG(LOG_VGAMISC, LOG_NORMAL)("Parts left: %u",
 			                             vga.draw.parts_left);
-			PIC_RemoveEvents(VGA_DrawPart);
+			Scheduler::RemoveEvents(VGA_DrawPart);
 			RENDER_EndUpdate(true);
 		}
 
 		vga.draw.lines_done = 0;
 		vga.draw.parts_left = vga.draw.parts_total;
 
-		PIC_AddEvent(VGA_DrawPart,
-		             vga.draw.delay.parts + draw_skip,
-		             vga.draw.parts_lines);
+		Scheduler::AddEvent(VGA_DrawPart,
+		                    vga.draw.delay.parts + draw_skip,
+		                    vga.draw.parts_lines);
 		break;
 
 	case DrawMode::Scanline:
@@ -1594,9 +1595,9 @@ static void VGA_VerticalTimer(uint32_t /*val*/)
 			                                 vga.draw.lines_done));
 
 			if (vga.draw.mode == DrawMode::ScanlineEga) {
-				PIC_RemoveEvents(VGA_DrawEGASingleLine);
+				Scheduler::RemoveEvents(VGA_DrawEGASingleLine);
 			} else {
-				PIC_RemoveEvents(VGA_DrawSingleLine);
+				Scheduler::RemoveEvents(VGA_DrawSingleLine);
 			}
 			RENDER_EndUpdate(true);
 		}
@@ -1604,11 +1605,11 @@ static void VGA_VerticalTimer(uint32_t /*val*/)
 		vga.draw.lines_done = 0;
 
 		if (vga.draw.mode == DrawMode::ScanlineEga) {
-			PIC_AddEvent(VGA_DrawEGASingleLine,
-			             vga.draw.delay.per_line_ms + draw_skip);
+			Scheduler::AddEvent(VGA_DrawEGASingleLine,
+			                    vga.draw.delay.per_line_ms + draw_skip);
 		} else {
-			PIC_AddEvent(VGA_DrawSingleLine,
-			             vga.draw.delay.per_line_ms + draw_skip);
+			Scheduler::AddEvent(VGA_DrawSingleLine,
+			                    vga.draw.delay.per_line_ms + draw_skip);
 		}
 		break;
 	}
@@ -3268,9 +3269,9 @@ ImageInfo setup_drawing()
 void VGA_SetupDrawing(uint32_t /*val*/)
 {
 	if (vga.mode == M_ERROR) {
-		PIC_RemoveEvents(VGA_VerticalTimer);
-		PIC_RemoveEvents(VGA_PanningLatch);
-		PIC_RemoveEvents(VGA_DisplayStartLatch);
+		Scheduler::RemoveEvents(VGA_VerticalTimer);
+		Scheduler::RemoveEvents(VGA_PanningLatch);
+		Scheduler::RemoveEvents(VGA_DisplayStartLatch);
 		return;
 	}
 
@@ -3287,10 +3288,10 @@ void VGA_SetupDrawing(uint32_t /*val*/)
 
 		VGA_KillDrawing();
 
-		PIC_RemoveEvents(VGA_Other_VertInterrupt);
-		PIC_RemoveEvents(VGA_VerticalTimer);
-		PIC_RemoveEvents(VGA_PanningLatch);
-		PIC_RemoveEvents(VGA_DisplayStartLatch);
+		Scheduler::RemoveEvents(VGA_Other_VertInterrupt);
+		Scheduler::RemoveEvents(VGA_VerticalTimer);
+		Scheduler::RemoveEvents(VGA_PanningLatch);
+		Scheduler::RemoveEvents(VGA_DisplayStartLatch);
 
 		VGA_VerticalTimer(0);
 	}
@@ -3338,9 +3339,9 @@ void VGA_SetupDrawing(uint32_t /*val*/)
 
 void VGA_KillDrawing(void)
 {
-	PIC_RemoveEvents(VGA_DrawPart);
-	PIC_RemoveEvents(VGA_DrawSingleLine);
-	PIC_RemoveEvents(VGA_DrawEGASingleLine);
+	Scheduler::RemoveEvents(VGA_DrawPart);
+	Scheduler::RemoveEvents(VGA_DrawSingleLine);
+	Scheduler::RemoveEvents(VGA_DrawEGASingleLine);
 
 	vga.draw.parts_left = 0;
 	vga.draw.lines_done = ~0;
