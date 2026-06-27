@@ -47,6 +47,64 @@ void DOSBOX_RequestShutdown();
 
 bool DOSBOX_IsShutdownRequested();
 
+// Pause state machine. FSM lives in src/dosbox.cpp.
+//
+// Five states across two axes:
+//   - Owner: User (manual) vs FocusLoss (auto on inactive window).
+//   - Phase: Requested (hotkey pressed, awaiting next VGA vretrace) vs
+//            Paused (active).
+//
+// Vretrace alignment keeps the last pre-pause frame whole; mixer.mutex
+// serialisation around transitions gives bit-identical capture across
+// pause cycles. Owner is part of state so focus-gain auto-resumes only
+// focus-loss pauses, leaving user-pauses intact. FocusLoss* upgrades to
+// User* on a manual pause hotkey; the reverse never happens.
+//
+// Mapper UI is orthogonal -- it suspends audio via MIXER_LockMixerThread
+// (same mixer.mutex) without going through the FSM.
+//
+enum class PauseState : uint8_t {
+	Running,
+	UserRequested,
+	UserPaused,
+	FocusLossRequested,
+	FocusLossPaused,
+};
+
+PauseState DOSBOX_GetPauseState();
+void DOSBOX_SetPauseState(PauseState new_state);
+
+// User-driven pause / resume intent. Mapper hotkey routes through these;
+// HTTP API will expose them as idempotent endpoints.
+//
+// RequestUserPause: Running -> UserRequested; from a FocusLoss* state,
+// upgrades ownership to User* so focus-gain no longer auto-resumes.
+// No-op when already user-paused.
+//
+// RequestUserResume: User* -> Running. No-op otherwise (only the focus
+// handler resumes FocusLoss* states).
+//
+void DOSBOX_RequestUserPause();
+void DOSBOX_RequestUserResume();
+
+inline bool DOSBOX_IsRunning()
+{
+	return DOSBOX_GetPauseState() == PauseState::Running;
+}
+
+inline bool DOSBOX_IsPaused()
+{
+	const auto s = DOSBOX_GetPauseState();
+	return s == PauseState::UserPaused || s == PauseState::FocusLossPaused;
+}
+
+inline bool DOSBOX_IsPauseRequested()
+{
+	const auto s = DOSBOX_GetPauseState();
+	return s == PauseState::UserRequested ||
+	       s == PauseState::FocusLossRequested;
+}
+
 // The E_Exit function throws an exception to quit. Call it in unexpected
 // circumstances.
 [[noreturn]] void E_Exit(const char *message, ...)

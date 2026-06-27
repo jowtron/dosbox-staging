@@ -4,12 +4,15 @@
 
 #include "dosbox.h"
 
+#include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 
 #ifdef WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -107,11 +110,127 @@ void Null_Init([[maybe_unused]] Section *sec) {
 	// do nothing
 }
 
+// ---------------------------------------------------------------------------
+// Pause state machine
+//
+// Single source of truth. All transitions go through DOSBOX_SetPauseState
+// (validated against the table in is_valid_transition). Callers that want
+// "user pressed the pause / resume button" semantics use
+// DOSBOX_RequestUserPause / DOSBOX_RequestUserResume. VGA / Voodoo vretrace
+// handlers do the *Requested -> *Paused transitions directly.
+// ---------------------------------------------------------------------------
+
+static std::mutex pause_state_mutex;
+static std::atomic<PauseState> pause_state{PauseState::Running};
+
+static const char* pause_state_to_string(const PauseState s)
+{
+	switch (s) {
+	case PauseState::Running:            return "Running";
+	case PauseState::UserRequested:      return "UserRequested";
+	case PauseState::UserPaused:         return "UserPaused";
+	case PauseState::FocusLossRequested: return "FocusLossRequested";
+	case PauseState::FocusLossPaused:    return "FocusLossPaused";
+	}
+	return "?";
+}
+
+static bool is_valid_transition(const PauseState from, const PauseState to)
+{
+	using PS = PauseState;
+	switch (from) {
+	case PS::Running:
+		return to == PS::UserRequested || to == PS::FocusLossRequested;
+	case PS::UserRequested:
+		return to == PS::UserPaused || to == PS::Running;
+	case PS::UserPaused:
+		return to == PS::Running;
+	case PS::FocusLossRequested:
+		return to == PS::FocusLossPaused || to == PS::Running ||
+		       to == PS::UserRequested;
+	case PS::FocusLossPaused:
+		return to == PS::Running || to == PS::UserPaused;
+	}
+	return false;
+}
+
+PauseState DOSBOX_GetPauseState()
+{
+	return pause_state.load();
+}
+
+void DOSBOX_SetPauseState(const PauseState new_state)
+{
+	const std::lock_guard lock(pause_state_mutex);
+
+	const auto prev = pause_state.load();
+	if (prev == new_state) {
+		return;
+	}
+	if (!is_valid_transition(prev, new_state)) {
+		LOG_WARNING("DOSBOX: Invalid pause transition %s -> %s",
+		            pause_state_to_string(prev),
+		            pause_state_to_string(new_state));
+		assert(false);
+		return;
+	}
+	pause_state.store(new_state);
+	LOG_MSG("DOSBOX: Pause %s -> %s",
+	        pause_state_to_string(prev),
+	        pause_state_to_string(new_state));
+}
+
+void DOSBOX_RequestUserPause()
+{
+	using PS = PauseState;
+	switch (DOSBOX_GetPauseState()) {
+	case PS::Running:            DOSBOX_SetPauseState(PS::UserRequested); break;
+	case PS::FocusLossRequested: DOSBOX_SetPauseState(PS::UserRequested); break;
+	case PS::FocusLossPaused:    DOSBOX_SetPauseState(PS::UserPaused);    break;
+	case PS::UserRequested:
+	case PS::UserPaused:
+		break;  // already user-paused
+	}
+}
+
+void DOSBOX_RequestUserResume()
+{
+	using PS = PauseState;
+	switch (DOSBOX_GetPauseState()) {
+	case PS::UserRequested:
+	case PS::UserPaused:
+		DOSBOX_SetPauseState(PS::Running);
+		break;
+	case PS::Running:
+	case PS::FocusLossRequested:
+	case PS::FocusLossPaused:
+		break;  // only the focus handler resumes focus-loss pauses
+	}
+}
+
+// CPU-thread tick body while paused. Minimal skeleton; subsequent commits
+// will pump frame presentation, host events, the mapper, and the webserver
+// bridge here.
+//
+static Bitu paused_tick()
+{
+	if (DOSBOX_IsShutdownRequested()) {
+		return 1;
+	}
+	constexpr uint64_t one_ms_ns = 1'000'000;
+	SDL_DelayPrecise(one_ms_ns);
+	return 0;
+}
+
 // forward declaration
 static void increase_ticks();
 
 static Bitu normal_loop()
 {
+	if (DOSBOX_IsPaused()) {
+		return paused_tick();
+	}
+
 	Bits ret;
 
 	while (true) {
