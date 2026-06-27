@@ -418,6 +418,12 @@ void OpenGlRenderer::RecreateInputTexture()
 	curr_framebuf.resize(num_pixels);
 	last_framebuf.resize(num_pixels);
 
+	// glTexImage2D above allocated the GPU texture but didn't populate
+	// it. Mark the CPU buffer dirty so the next PrepareFrame uploads what
+	// we have -- otherwise during pause the GPU side stays uninitialised
+	// (black screen) until a fresh emulator frame happens to come in.
+	last_framebuf_dirty = true;
+
 	constexpr auto BytesPerPixel = sizeof(uint32_t);
 	const auto pitch_bytes       = pitch_pixels * BytesPerPixel;
 

@@ -6,7 +6,9 @@
 
 #include "render_backend.h"
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include "gui/private/common.h"
 #include "gui/render/render.h"
@@ -89,6 +91,13 @@ private:
 
 	// Contains the last fully rendered frame, waiting to be presented.
 	SDL_Surface* last_framebuf = {};
+
+	// Persistent CPU-side mirror of last_framebuf. NotifyRenderSizeChanged
+	// destroys the SDL_Surface above (and with it the pixels); during pause
+	// no fresh frame arrives, so the presenter would draw a blank
+	// surface -- black screen, black screenshots. Mirrors what OpenGL gets
+	// for free via its std::vector storage.
+	std::vector<uint32_t> persistent_framebuf = {};
 
 	// True if the last framebuffer has been updated since the last present
 	bool last_framebuf_dirty = false;

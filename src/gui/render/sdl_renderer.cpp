@@ -227,6 +227,22 @@ void SdlRenderer::NotifyRenderSizeChanged(const int render_width_px,
 	default: assertm(false, "Invalid TextureFilterMode"); return;
 	}
 
+	// Snapshot the existing held frame BEFORE destroying its surface so we
+	// can restore it after recreate. Without this, a pause-time window
+	// event (resize, fullscreen toggle, mapper open/close) destroys the
+	// only copy and the presenter shows black until the emulator produces
+	// a new frame -- which during pause never happens.
+	if (last_framebuf) {
+		const size_t old_pixels = static_cast<size_t>(last_framebuf->w) *
+		                          static_cast<size_t>(last_framebuf->h);
+		if (old_pixels > 0) {
+			persistent_framebuf.resize(old_pixels);
+			std::memcpy(persistent_framebuf.data(),
+			            last_framebuf->pixels,
+			            old_pixels * sizeof(uint32_t));
+		}
+	}
+
 	if (curr_framebuf) {
 		SDL_DestroySurface(curr_framebuf);
 	}
@@ -234,20 +250,30 @@ void SdlRenderer::NotifyRenderSizeChanged(const int render_width_px,
 		SDL_DestroySurface(last_framebuf);
 	}
 
-	curr_framebuf = SDL_CreateSurface(
-	                                               render_width_px,
-	                                               render_height_px,
-	                                               SdlPixelFormat);
+	curr_framebuf = SDL_CreateSurface(render_width_px,
+	                                  render_height_px,
+	                                  SdlPixelFormat);
 
-	last_framebuf = SDL_CreateSurface(
-	                                               render_width_px,
-	                                               render_height_px,
-	                                               SdlPixelFormat);
+	last_framebuf = SDL_CreateSurface(render_width_px,
+	                                  render_height_px,
+	                                  SdlPixelFormat);
 
 	if (!curr_framebuf || !last_framebuf) {
 		SDL_DestroyTexture(texture);
 		LOG_ERR("SDL: Error creating input surface: %s", SDL_GetError());
 		return;
+	}
+
+	// Restore the snapshot if the new surface has matching dimensions;
+	// otherwise accept one black frame until the emulator paints fresh
+	// content.
+	const size_t new_pixels = static_cast<size_t>(render_width_px) *
+	                          static_cast<size_t>(render_height_px);
+	if (persistent_framebuf.size() == new_pixels && new_pixels > 0) {
+		std::memcpy(last_framebuf->pixels,
+		            persistent_framebuf.data(),
+		            new_pixels * sizeof(uint32_t));
+		last_framebuf_dirty = true;
 	}
 }
 
