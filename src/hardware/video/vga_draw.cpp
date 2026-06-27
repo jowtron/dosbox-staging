@@ -3319,6 +3319,13 @@ void VGA_SetupDrawing(uint32_t /*val*/)
 		        image_info.video_mode);
 
 		if (shader_changed) {
+			// Push the new shader's force_single_scan into VGA before
+			// the geometry recompute -- otherwise setup_drawing() reads
+			// the stale scan_doubling_allowed flag and we commit a
+			// vga.draw.image_info that mismatches what the new shader
+			// expects (manifests as stride-mismatched garbage when the
+			// scan boundary is crossed via window resize / mapper).
+			RENDER_SetScanAndPixelDoubling();
 			image_info = setup_drawing();
 		}
 

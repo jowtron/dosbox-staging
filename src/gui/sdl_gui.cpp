@@ -32,6 +32,7 @@
 #include "hardware/input/keyboard.h"
 #include "hardware/input/mouse.h"
 #include "hardware/timer.h"
+#include "hardware/scheduler.h"
 #include "hardware/video/vga.h"
 #include "misc/cross.h"
 #include "misc/notifications.h"
@@ -313,8 +314,29 @@ void GFX_ResetScreen()
 
 	CPU_ResetAutoAdjust();
 
+	// The callback's update_viewport may have triggered an auto-shader
+	// switch (e.g. resize crossed the scan-doubling threshold while the
+	// mapper was open). Push the new shader's force_single_scan into VGA
+	// here so VGA_SetupDrawing's image_info comparison sees the new
+	// geometry instead of skipping the branch with the stale flag.
+	RENDER_SetScanAndPixelDoubling();
+
 	VGA_SetupDrawing(0);
 	GFX_Start();
+
+	// While paused, normal_loop isn't ticking the Scheduler so the queued
+	// VGA_VerticalTimer + DrawPart events that would normally fill
+	// render.scale.cache after a geometry change never fire. The held
+	// framebuffer stays at the pre-resize content and -- at the new
+	// dimensions -- shows truncated / half-height garbage. Drive ~one
+	// frame's worth of Scheduler time here so a fresh VGA scanout
+	// populates the renderer's last_framebuf at the new geometry, then
+	// present immediately so the OS doesn't show the stale framebuffer
+	// stretched to the new window size for a few ms.
+	if (DOSBOX_IsPaused() && vga.draw.delay.vtotal > 0.0) {
+		Scheduler::AdvanceBy(vga.draw.delay.vtotal * 2.0 + 1.0);
+		GFX_MaybePresentFrame();
+	}
 }
 
 static bool is_vsync_enabled()

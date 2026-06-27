@@ -20,6 +20,7 @@
 #include "gui/common.h"
 #include "gui/mapper.h"
 #include "gui/render/render.h"
+#include "hardware/video/vga.h"
 #include "gui/render/render_backend.h"
 #include "hardware/video/vga.h"
 #include "misc/notifications.h"
@@ -348,7 +349,7 @@ static void deinterlace_rendered_output()
 	render.deinterlacer->Deinterlace(image, render.deinterlacing_strength);
 }
 
-void RENDER_EndUpdate([[maybe_unused]] bool abort)
+void RENDER_EndUpdate(const bool abort)
 {
 	if (!render.render_in_progress) {
 		return;
@@ -356,7 +357,18 @@ void RENDER_EndUpdate([[maybe_unused]] bool abort)
 
 	RENDER_DrawLine = empty_line_handler;
 
-	if (CAPTURE_IsCapturingImage() || CAPTURE_IsCapturingVideo()) {
+	// Two gates on capture:
+	//   * !abort: aborted scanouts (vretrace cleanup, VGA_KillDrawing)
+	//     have a half-filled cache. Capturing one inserts a frame of
+	//     stripe garbage -- visible at the resume edge, where
+	//     GFX_ResetScreen's VGA_SetupDrawing can call VGA_KillDrawing
+	//     while a pre-pause scanout is still in flight.
+	//   * DOSBOX_IsRunning: synthetic frames produced by
+	//     Scheduler::AdvanceBy during a pause-time shader auto-switch
+	//     mustn't pollute the active video capture (same-set-of-frames
+	//     invariant in pause vs. no-pause runs).
+	if (!abort && DOSBOX_IsRunning() &&
+	    (CAPTURE_IsCapturingImage() || CAPTURE_IsCapturingVideo())) {
 		handle_capture_frame();
 	}
 

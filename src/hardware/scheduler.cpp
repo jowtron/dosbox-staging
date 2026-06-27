@@ -104,10 +104,16 @@ void AdvanceTo(const double absolute_time_ms)
 	clock_now_ms = absolute_time_ms;
 }
 
-void TickUntilVgaFrameComplete()
+void AdvanceBy(const double delta_ms)
 {
-	// TODO: wire to the VGA frame-complete signal once VGA moves onto the
-	// scheduler. Stub for now.
+	// Fired events mutate emulator state (vga.draw,
+	// render.render_in_progress, scanout addresses); we deliberately don't
+	// snapshot/restore that, so the queue is left in its post-AdvanceBy
+	// state and stays consistent with the mutated state on resume.
+	// Pause-time AdvanceBy may therefore shift capture timing by one frame;
+	// bit-identical capture is preserved across passive pause/unpause
+	// cycles (no AdvanceBy runs).
+	AdvanceTo(clock_now_ms + delta_ms);
 }
 
 }  // namespace Scheduler

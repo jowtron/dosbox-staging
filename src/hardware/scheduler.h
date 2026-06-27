@@ -75,10 +75,10 @@ double Now();
 // operation.
 void AdvanceTo(double absolute_time_ms);
 
-// Drive forward until VGA emits a frame-complete signal. Used during
-// pause to refresh the held framebuffer after a scan-doubling change.
-// Stub until VGA migration wires the signal up.
-void TickUntilVgaFrameComplete();
+// Convenience: advance by `delta_ms` from `Now()`. Used during pause to
+// drive VGA forward synchronously (e.g. one frame's worth after a
+// scan-doubling change) without un-pausing the CPU.
+void AdvanceBy(double delta_ms);
 
 }  // namespace Scheduler
 
