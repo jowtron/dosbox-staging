@@ -72,6 +72,7 @@ target_sources(dosboxcommon PRIVATE
   pci_bus.cpp
   pic.cpp
   port.cpp
+  scheduler.cpp
   timer.cpp
   virtualbox.cpp
   vmware.cpp
