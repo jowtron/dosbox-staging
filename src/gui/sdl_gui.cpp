@@ -286,7 +286,9 @@ void GFX_RequestExit(const bool pressed)
 	} else {
 		DOSBOX_RequestUserPause();
 	}
-	TITLEBAR_RefreshTitle();
+	// Titlebar refresh happens inside SetPauseState when the *Paused/
+	// Running edge is actually crossed (the hotkey only flips state to
+	// *Requested, which is a no-op for the titlebar).
 }
 
 bool GFX_IsPaused()
@@ -2083,7 +2085,6 @@ static void handle_pause_when_inactive(const SDL_Event& event)
 		KEYBOARD_ClrBuffer();
 		if (DOSBOX_GetPauseState() == PauseState::Running) {
 			DOSBOX_SetPauseState(PauseState::FocusLossRequested);
-			TITLEBAR_RefreshTitle();
 		}
 		break;
 
@@ -2094,7 +2095,6 @@ static void handle_pause_when_inactive(const SDL_Event& event)
 		if (s == PauseState::FocusLossRequested ||
 		    s == PauseState::FocusLossPaused) {
 			DOSBOX_SetPauseState(PauseState::Running);
-			TITLEBAR_RefreshTitle();
 		}
 		if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
 			apply_active_settings();

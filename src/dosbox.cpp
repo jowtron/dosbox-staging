@@ -39,6 +39,7 @@
 #include "gui/common.h"
 #include "gui/mapper.h"
 #include "gui/render/render.h"
+#include "gui/titlebar.h"
 #include "hardware/audio/gus.h"
 #include "hardware/audio/imfc.h"
 #include "hardware/audio/innovation.h"
@@ -56,8 +57,8 @@
 #include "hardware/network/ne2000.h"
 #include "hardware/pci_bus.h"
 #include "hardware/pic.h"
-#include "hardware/scheduler.h"
 #include "hardware/port.h"
+#include "hardware/scheduler.h"
 #include "hardware/serialport/serialport.h"
 #include "hardware/timer.h"
 #include "hardware/video/reelmagic/reelmagic.h"
@@ -75,8 +76,8 @@
 #include "shell/autoexec.h"
 #include "shell/shell.h"
 #include "utils/math_utils.h"
-#include "webserver/webserver.h"
 #include "webserver/bridge.h"
+#include "webserver/webserver.h"
 
 MachineType machine   = MachineType::None;
 SvgaType    svga_type = SvgaType::None;
@@ -202,35 +203,59 @@ static void update_audio_pause_state()
 
 void DOSBOX_SetPauseState(const PauseState new_state)
 {
-	const std::lock_guard lock(pause_state_mutex);
+	bool was_paused  = false;
+	bool now_running = false;
+	PauseState prev  = PauseState::Running;
 
-	const auto prev = pause_state.load();
-	if (prev == new_state) {
-		return;
+	{
+		const std::lock_guard lock(pause_state_mutex);
+
+		prev = pause_state.load();
+		if (prev == new_state) {
+			return;
+		}
+		if (!is_valid_transition(prev, new_state)) {
+			LOG_WARNING("DOSBOX: Invalid pause transition %s -> %s",
+			            pause_state_to_string(prev),
+			            pause_state_to_string(new_state));
+			assert(false);
+			return;
+		}
+
+		was_paused  = (prev == PauseState::UserPaused ||
+                              prev == PauseState::FocusLossPaused);
+		now_running = (new_state == PauseState::Running);
+
+		pause_state.store(new_state);
+
+		if (was_paused && now_running) {
+			rebase_wall_clock_on_resume();
+		}
+
+		update_audio_pause_state();
 	}
-	if (!is_valid_transition(prev, new_state)) {
-		LOG_WARNING("DOSBOX: Invalid pause transition %s -> %s",
-		            pause_state_to_string(prev),
-		            pause_state_to_string(new_state));
-		assert(false);
-		return;
+
+	// No resume-side GFX_ResetScreen: pause-time window events (resize,
+	// fullscreen toggle, mapper close, DPI change) all call it themselves,
+	// so a second call here is redundant in the common case -- and active
+	// harm when scanout is still in flight, because the render_callback
+	// chain swaps RENDER_DrawLine to finish_line_handler mid-frame and the
+	// in-flight frame's RENDER_EndUpdate then captures a torn cache into
+	// the active video capture.
+
+	// Log + refresh the titlebar only on user-visible edges: pause
+	// becoming active or fully resumed. The *Requested phase is an
+	// internal latch for vretrace alignment.
+	const bool now_paused = (new_state == PauseState::UserPaused ||
+	                         new_state == PauseState::FocusLossPaused);
+	if (now_paused != was_paused) {
+		TITLEBAR_RefreshTitle();
 	}
-
-	const bool was_paused      = (prev == PauseState::UserPaused ||
-	                              prev == PauseState::FocusLossPaused);
-	const bool now_running     = (new_state == PauseState::Running);
-
-	pause_state.store(new_state);
-
-	if (was_paused && now_running) {
-		rebase_wall_clock_on_resume();
+	if (now_paused && !was_paused) {
+		LOG_MSG("DOSBOX: Paused (%s)", pause_state_to_string(new_state));
+	} else if (was_paused && now_running) {
+		LOG_MSG("DOSBOX: Resumed");
 	}
-
-	update_audio_pause_state();
-
-	LOG_MSG("DOSBOX: Pause %s -> %s",
-	        pause_state_to_string(prev),
-	        pause_state_to_string(new_state));
 }
 
 void DOSBOX_RequestUserPause()
