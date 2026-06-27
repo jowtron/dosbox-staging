@@ -7,6 +7,7 @@
 #include <string>
 
 #include "config/setup.h"
+#include "dosbox.h"
 #include "misc/std_filesystem.h"
 #include "utils/checks.h"
 #include "utils/string_utils.h"
@@ -194,12 +195,28 @@ ImageSaver& ImageCapturer::GetNextImageSaver()
 	return image_savers[current_image_saver_index];
 }
 
+// During pause `RENDER_EndUpdate` doesn't fire, so the normal vretrace-driven
+// `MaybeCaptureImage` drain never runs and the request stays Pending forever
+// (rendered-only captures would also hit a stale `rendered_path` from a prior
+// non-paused capture). Drive the drain synchronously here using the held
+// frame still in `render.scale.cache`; each press allocates its own index
+// inside `MaybeCaptureImage` so repeated rapid presses produce distinct
+// indexed files instead of overwriting one. No effect outside pause.
+//
+void ImageCapturer::MaybeDrainOnPause()
+{
+	if (DOSBOX_IsPaused()) {
+		MaybeCaptureImage(RENDER_GetCurrentImage());
+	}
+}
+
 void ImageCapturer::RequestRawCapture()
 {
 	if (state.raw != CaptureState::Off) {
 		return;
 	}
 	state.raw = CaptureState::Pending;
+	MaybeDrainOnPause();
 }
 
 void ImageCapturer::RequestUpscaledCapture()
@@ -208,6 +225,7 @@ void ImageCapturer::RequestUpscaledCapture()
 		return;
 	}
 	state.upscaled = CaptureState::Pending;
+	MaybeDrainOnPause();
 }
 
 void ImageCapturer::RequestRenderedCapture()
@@ -216,6 +234,7 @@ void ImageCapturer::RequestRenderedCapture()
 		return;
 	}
 	state.rendered = CaptureState::Pending;
+	MaybeDrainOnPause();
 }
 
 void ImageCapturer::RequestGroupedCapture()
@@ -224,4 +243,5 @@ void ImageCapturer::RequestGroupedCapture()
 		return;
 	}
 	state.grouped = CaptureState::Pending;
+	MaybeDrainOnPause();
 }

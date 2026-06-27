@@ -264,6 +264,11 @@ void RENDER_SetSize(const ImageInfo& image_info, const double frames_per_second)
 bool RENDER_StartUpdate();
 void RENDER_EndUpdate(bool abort);
 
+// Snapshot the last-completed frame in render's scaler cache as a
+// RenderedImage. image_data points to render-owned memory; callers that
+// want to outlive the next frame must deep_copy.
+RenderedImage RENDER_GetCurrentImage();
+
 void RENDER_SetPalette(const uint8_t entry, const uint8_t red,
                        const uint8_t green, const uint8_t blue);
 

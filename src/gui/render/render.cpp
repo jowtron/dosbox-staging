@@ -285,40 +285,27 @@ static void halt_render()
 	render.active             = false;
 }
 
-static void handle_capture_frame()
+RenderedImage RENDER_GetCurrentImage()
 {
 	RenderedImage image = {};
+	image.params        = render.src;
+	image.pitch         = render.scale.cache_pitch;
+	image.image_data    = reinterpret_cast<uint8_t*>(render.scale.cache.data());
+	image.palette       = render.palette.rgb;
 
-	image.params = render.src;
-	image.pitch  = render.scale.cache_pitch;
-
-	image.image_data = reinterpret_cast<uint8_t*>(render.scale.cache.data());
-
-	image.palette = render.palette.rgb;
-
-	const auto frames_per_second = static_cast<float>(render.fps);
-
+	// Returned pixel data is a non-owning view into the scaler cache
+	// (or, when deinterlacing, the deinterlacer's internal buffer).
+	// Callers that need to outlive the next frame must deep_copy.
 	if (is_deinterlacing()) {
-		// The pixel data in the returned new image points either to the
-		// input image's data (for 32-bit BGRX images), or to the
-		// deinterlacer's internal decode buffer (for any other pixel
-		// format). We *must not* call `free()` on `new_image` in either
-		// case as it doesn't own these pixel data buffers.
-		//
-		auto new_image = render.deinterlacer->Deinterlace(
-		        image, render.deinterlacing_strength);
-
-		// The image capturer will create its own deep copy the rendered
-		// image (and thus of the pixel data), and will free it when
-		// it's done with it.
-		//
-		// The video capturer doesn't create a copy, and consequently
-		// doesn't free the rendered image either.
-		CAPTURE_AddFrame(new_image, frames_per_second);
-
-	} else {
-		CAPTURE_AddFrame(image, frames_per_second);
+		return render.deinterlacer->Deinterlace(image,
+		                                        render.deinterlacing_strength);
 	}
+	return image;
+}
+
+static void handle_capture_frame()
+{
+	CAPTURE_AddFrame(RENDER_GetCurrentImage(), static_cast<float>(render.fps));
 }
 
 static void deinterlace_rendered_output()
