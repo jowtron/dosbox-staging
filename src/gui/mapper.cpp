@@ -2991,24 +2991,31 @@ void MAPPER_LosingFocus() {
 	}
 }
 
-void MAPPER_RunEvent(uint32_t /*val*/)
-{
-	// Clear buffer
-	KEYBOARD_ClrBuffer();           
-	
-	// Release any keys pressed (buffer gets filled again).
-	GFX_LosingFocus();		
-
-	MAPPER_DisplayUI();
-}
+static std::atomic<bool> mapper_run_pending = false;
 
 void MAPPER_Run(bool pressed) {
 	if (pressed) {
 		return;
 	}
 
-	// In case mapper deletes the key object that ran it
-	PIC_AddEvent(MAPPER_RunEvent,0);	
+	// Deferred via an atomic flag rather than PIC_AddEvent: PIC time is
+	// frozen during pause, so a PIC-scheduled event never fires while
+	// paused and the hotkey would be silently dropped. MAPPER_RunPending
+	// is drained from both normal_loop's idle branch and paused_tick.
+	mapper_run_pending.store(true);
+}
+
+void MAPPER_RunPending() {
+	if (!mapper_run_pending.exchange(false)) {
+		return;
+	}
+	// Clear buffer
+	KEYBOARD_ClrBuffer();
+
+	// Release any keys pressed (buffer gets filled again).
+	GFX_LosingFocus();
+
+	MAPPER_DisplayUI();
 }
 
 SDL_Surface* SDL_SetVideoMode_Wrap(int width,int height,int bpp,uint32_t flags);
