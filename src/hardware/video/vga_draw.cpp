@@ -1388,6 +1388,19 @@ static void VGA_PanningLatch(uint32_t /*val*/)
 
 static void VGA_VerticalTimer(uint32_t /*val*/)
 {
+	// Vretrace is the alignment point for pause activation: it ensures the
+	// last pre-pause frame is fully scanned and presented before the CPU
+	// thread parks in paused_tick.
+	switch (DOSBOX_GetPauseState()) {
+	case PauseState::UserRequested:
+		DOSBOX_SetPauseState(PauseState::UserPaused);
+		break;
+	case PauseState::FocusLossRequested:
+		DOSBOX_SetPauseState(PauseState::FocusLossPaused);
+		break;
+	default: break;
+	}
+
 	vga.draw.delay.framestart = PIC_FullIndex();
 	Scheduler::AddEvent(VGA_VerticalTimer, vga.draw.delay.vtotal);
 
