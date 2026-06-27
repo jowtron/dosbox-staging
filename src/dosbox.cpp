@@ -257,6 +257,8 @@ static Bitu paused_tick()
 		Webserver::Bridge::Instance().ProcessRequests();
 	}
 
+	MAPPER_RunPending();
+
 	constexpr uint64_t one_ms_ns = 1'000'000;
 	SDL_DelayPrecise(one_ms_ns);
 	return 0;
@@ -316,6 +318,8 @@ static Bitu normal_loop()
 			if (GFX_GetPresentationMode() == PresentationMode::HostRate) {
 				GFX_MaybePresentFrame();
 			}
+
+			MAPPER_RunPending();
 
 			if (!GFX_PollAndHandleEvents()) {
 				return 0;
