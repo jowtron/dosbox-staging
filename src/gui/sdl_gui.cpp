@@ -390,6 +390,13 @@ void GFX_ResetScreen()
 
 	CPU_ResetAutoAdjust();
 
+	// The callback's `update_viewport()` may have triggered an auto-shader
+	// switch (e.g. resize crossed the scan-doubling threshold while the
+	// mapper was open). Push the new shader's `force_single_scan` into VGA
+	// here so `VGA_SetupDrawing()`'s `image_info` comparison sees the new
+	// geometry instead of skipping the branch with the stale flag.
+	RENDER_SetScanAndPixelDoubling();
+
 	VGA_SetupDrawing(0);
 	GFX_Start();
 }
