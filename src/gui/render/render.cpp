@@ -397,10 +397,16 @@ void RENDER_EndUpdate(const bool abort)
 		latch_last_complete_source();
 	}
 
-	// Aborted scanouts (vretrace cleanup, `VGA_KillDrawing()`) leave a
-	// half-filled cache. Capturing one inserts a frame of stripe garbage
-	// into the AVI / screenshot.
-	if (!abort && (CAPTURE_IsCapturingImage() || CAPTURE_IsCapturingVideo())) {
+	// Two gates on capture:
+	//   * `!abort`: aborted scanouts (vretrace cleanup,
+	//     `VGA_KillDrawing()`) leave a half-filled cache. Capturing one
+	//     inserts a frame of stripe garbage.
+	//   * `DOSBOX_IsRunning()`: synthetic frames produced by
+	//     `RENDER_RescaleLastFrame()` during a pause-time recreate
+	//     mustn't pollute an active video capture (same-set-of-frames
+	//     invariant in pause vs. no-pause runs).
+	if (!abort && DOSBOX_IsRunning() &&
+	    (CAPTURE_IsCapturingImage() || CAPTURE_IsCapturingVideo())) {
 		handle_capture_frame();
 	}
 
