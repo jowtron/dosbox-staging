@@ -39,6 +39,7 @@
 #include "gui/common.h"
 #include "gui/mapper.h"
 #include "gui/render/render.h"
+#include "gui/titlebar.h"
 #include "hardware/audio/gus.h"
 #include "hardware/audio/imfc.h"
 #include "hardware/audio/innovation.h"
@@ -202,35 +203,57 @@ static void update_subsystem_pause_state()
 
 void DOSBOX_SetPauseState(const PauseState new_state)
 {
-	const std::lock_guard lock(pause_state_mutex);
+	using enum PauseState;
 
-	const auto prev = pause_state.load();
-	if (prev == new_state) {
-		return;
+	bool was_paused  = false;
+	bool now_running = false;
+	PauseState prev  = Running;
+
+	{
+		const std::lock_guard lock(pause_state_mutex);
+
+		prev = pause_state.load();
+		if (prev == new_state) {
+			return;
+		}
+
+		if (!is_valid_transition(prev, new_state)) {
+			LOG_WARNING("DOSBOX: Invalid pause transition %s -> %s",
+			            pause_state_to_string(prev),
+			            pause_state_to_string(new_state));
+
+			assertm(false, "Invalid PauseState transition");
+			return;
+		}
+
+		was_paused  = (prev == UserPaused || prev == FocusLossPaused);
+		now_running = (new_state == Running);
+
+		pause_state.store(new_state);
+
+		if (was_paused && now_running) {
+			rebase_wall_clock_on_resume();
+		}
+
+		update_subsystem_pause_state();
 	}
-	if (!is_valid_transition(prev, new_state)) {
-		LOG_WARNING("DOSBOX: Invalid pause transition %s -> %s",
-		            pause_state_to_string(prev),
-		            pause_state_to_string(new_state));
-		assert(false);
-		return;
+
+	// Log + refresh the titlebar only on user-visible edges: pause
+	// becoming active or fully resumed. Owner-only transitions
+	// (`FocusLossPaused` -> `UserPaused`) skip both -- nothing the user
+	// sees changes.
+	const bool now_paused = (new_state == UserPaused ||
+	                         new_state == FocusLossPaused);
+
+	if (now_paused != was_paused) {
+		TITLEBAR_RefreshTitle();
 	}
 
-	const bool was_paused      = (prev == PauseState::UserPaused ||
-	                              prev == PauseState::FocusLossPaused);
-	const bool now_running     = (new_state == PauseState::Running);
-
-	pause_state.store(new_state);
-
-	if (was_paused && now_running) {
-		rebase_wall_clock_on_resume();
+	if (now_paused && !was_paused) {
+		LOG_MSG("DOSBOX: Paused (%s)", pause_state_to_string(new_state));
+	} else if (was_paused && now_running) {
+		LOG_MSG("DOSBOX: Resumed");
 	}
-
-	update_subsystem_pause_state();
-
-	LOG_MSG("DOSBOX: Pause %s -> %s",
-	        pause_state_to_string(prev),
-	        pause_state_to_string(new_state));
 }
 
 void DOSBOX_RequestUserPause()
