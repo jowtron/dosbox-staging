@@ -2745,12 +2745,28 @@ static void set_mixer_state(const MixerState new_state)
 	        to_string(new_state));
 #endif
 
-	if (new_state == MixerState::Muted || new_state == MixerState::Paused) {
-		// Clear queued audio so resume doesn't replay pre-pause samples.
-		// capture_queue is NOT cleared -- it's a separate path for video
-		// capture that must drain in FIFO order for bit-identical output.
+	const auto prev_state = mixer.state.load();
+	const bool was_silent  = (prev_state == MixerState::Muted ||
+	                          prev_state == MixerState::Paused);
+	const bool will_be_silent = (new_state == MixerState::Muted ||
+	                             new_state == MixerState::Paused);
+
+	if (was_silent && !will_be_silent) {
+		// Returning to On. Drop the silence the mixer thread pushed
+		// into final_output while we were silent. Otherwise the
+		// fade-in ramp in mixer_callback (state edge: silent -> On)
+		// would lift gain from 0 to 1 over those queued silence
+		// samples and the first fresh real audio behind them would
+		// arrive at full gain again -- click. capture_queue is NOT
+		// cleared; that's a separate path with its own FIFO invariant.
 		mixer.final_output.Clear();
 	}
+	// On the way into Paused/Muted we intentionally do NOT clear --
+	// any pre-pause real audio still queued drains naturally as SDL
+	// pulls, and mixer_callback applies its gain ramp to those samples
+	// before they reach the host. Clearing here would replace that
+	// ramp-able real audio with silence, which makes the fade a no-op
+	// and leaves the click.
 
 	mixer.state = new_state;
 }
