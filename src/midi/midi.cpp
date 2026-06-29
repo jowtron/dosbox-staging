@@ -584,6 +584,19 @@ void MIDI_Unmute()
 	midi.is_muted = false;
 }
 
+// Pause MIDI output as part of a DOSBox pause.
+//
+// !!! ORDER MATTERS: this must be called BEFORE MIXER_Pause(). !!!
+//
+// Halting the software synth renderer before the mixer stops draining
+// keeps the renderer from rushing to fill the `audio_frame_fifo`
+// headroom that opens up the moment the mixer halts. With the reverse
+// order, the synth's internal clock advances by up to one mixer pull
+// (~21 ms) per pause cycle, and the rendered samples reach the capture
+// queue on resume -- captured music stretches by N * ~21 ms across N
+// pause/resume cycles. See the header comment on `set_subsystems_paused`
+// in dosbox.cpp for the full analysis.
+//
 void MIDI_Pause()
 {
 	// If the user has already muted via the mixer, don't double-mute.
@@ -592,10 +605,31 @@ void MIDI_Pause()
 	if (!MIXER_IsManuallyMuted()) {
 		MIDI_Mute();
 	}
+	// External devices got the volume-zero broadcast above. For internal
+	// software synths (FluidSynth/MT-32/SoundCanvas) this halts their
+	// renderer thread so the synth's internal clock doesn't advance
+	// during the pause; default no-op override for External.
+	if (MIDI_IsAvailable()) {
+		midi.device->Pause();
+	}
 }
 
+// Resume MIDI output as part of a DOSBox resume.
+//
+// !!! ORDER MATTERS: this must be called AFTER MIXER_Resume(). !!!
+//
+// The mixer must drain the pre-pause buffered audio from
+// `audio_frame_fifo` before the renderer wakes; otherwise the renderer
+// refills the fifo headroom in the gap before the mixer starts pulling,
+// the synth's internal clock advances, and the extra samples reach the
+// capture queue. See `set_subsystems_paused` in dosbox.cpp for the full
+// analysis.
+//
 void MIDI_Resume()
 {
+	if (MIDI_IsAvailable()) {
+		midi.device->Resume();
+	}
 	if (!MIXER_IsManuallyMuted()) {
 		MIDI_Unmute();
 	}
