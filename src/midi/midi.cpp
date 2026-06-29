@@ -592,10 +592,20 @@ void MIDI_Pause()
 	if (!MIXER_IsManuallyMuted()) {
 		MIDI_Mute();
 	}
+	// External devices get a volume-zero broadcast from MIDI_Mute().
+	// Internal software synths run their own renderer thread; the no-op
+	// default override is only useful for external devices, so this also
+	// halts FluidSynth/MT-32/SoundCanvas renderers via their override.
+	if (MIDI_IsAvailable()) {
+		midi.device->Pause();
+	}
 }
 
 void MIDI_Resume()
 {
+	if (MIDI_IsAvailable()) {
+		midi.device->Resume();
+	}
 	if (!MIXER_IsManuallyMuted()) {
 		MIDI_Unmute();
 	}

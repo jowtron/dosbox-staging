@@ -796,6 +796,10 @@ MidiDeviceFluidSynth::~MidiDeviceFluidSynth()
 	work_fifo.Stop();
 	audio_frame_fifo.Stop();
 
+	// Wake the renderer if it's blocked in the pause condvar so it sees
+	// `work_fifo.IsRunning() == false` and exits cleanly.
+	Resume();
+
 	// Wait for the rendering thread to finish
 	if (renderer.joinable()) {
 		renderer.join();
@@ -1073,9 +1077,35 @@ void MidiDeviceFluidSynth::ProcessWorkFromFifo()
 void MidiDeviceFluidSynth::Render()
 {
 	while (work_fifo.IsRunning()) {
+		if (is_paused.load(std::memory_order_acquire)) {
+			// Halt the synth so it stops advancing past the pause
+			// boundary. `audio_frame_fifo` is left intact; on
+			// resume the mixer drains the buffered pre-pause
+			// continuation rather than stale post-pause state.
+			std::unique_lock lock(pause_mutex);
+			pause_cv.wait(lock, [this] {
+				return !is_paused.load(std::memory_order_acquire) ||
+				       !work_fifo.IsRunning();
+			});
+			continue;
+		}
 		work_fifo.IsEmpty() ? RenderAudioFramesToFifo()
 		                    : ProcessWorkFromFifo();
 	}
+}
+
+void MidiDeviceFluidSynth::Pause()
+{
+	is_paused.store(true, std::memory_order_release);
+}
+
+void MidiDeviceFluidSynth::Resume()
+{
+	{
+		const std::lock_guard lock(pause_mutex);
+		is_paused.store(false, std::memory_order_release);
+	}
+	pause_cv.notify_all();
 }
 
 std_fs::path MidiDeviceFluidSynth::GetSoundFontPath()

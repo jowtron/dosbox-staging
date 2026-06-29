@@ -33,6 +33,16 @@ public:
 
 	virtual void SendMidiMessage(const MidiMessage& msg)      = 0;
 	virtual void SendSysExMessage(uint8_t* sysex, size_t len) = 0;
+
+	// Pause / resume hooks for software synths with their own renderer
+	// thread (FluidSynth, MT-32, SoundCanvas). Halts the renderer so it
+	// stops advancing the synth's internal state past the pause boundary;
+	// on resume the channel's `audio_frame_fifo` gives up the buffered
+	// pre-pause continuation rather than stale post-pause synth state.
+	// External devices have no renderer to halt -- their pause path is
+	// `MIDI_Mute()`'s volume-zero broadcast.
+	virtual void Pause() {}
+	virtual void Resume() {}
 };
 
 void MIDI_Reset(MidiDevice* device);
