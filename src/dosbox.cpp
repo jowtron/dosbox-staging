@@ -300,7 +300,35 @@ void DOSBOX_RequestUserResume()
 
 	case Running:
 	case AutoPaused:
-		break;  // only the focus handler resumes auto-pauses
+		break;  // only the auto-resume path resumes auto-pauses
+	}
+}
+
+void DOSBOX_RequestAutoPause()
+{
+	using enum PauseState;
+
+	switch (DOSBOX_GetPauseState()) {
+	case Running:    DOSBOX_SetPauseState(AutoPaused); break;
+
+	case UserPaused:
+	case AutoPaused:
+		break;  // user-pause survives auto signals; auto-pause is idempotent
+	}
+}
+
+void DOSBOX_RequestAutoResume()
+{
+	using enum PauseState;
+
+	switch (DOSBOX_GetPauseState()) {
+	case AutoPaused:
+		DOSBOX_SetPauseState(Running);
+		break;
+
+	case Running:
+	case UserPaused:
+		break;  // never auto-resume a user pause
 	}
 }
 
