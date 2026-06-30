@@ -142,9 +142,9 @@ static const char* pause_state_to_string(const PauseState s)
 	using enum PauseState;
 
 	switch (s) {
-	case Running:         return "Running";
-	case UserPaused:      return "UserPaused";
-	case FocusLossPaused: return "FocusLossPaused";
+	case Running:    return "Running";
+	case UserPaused: return "UserPaused";
+	case AutoPaused: return "AutoPaused";
 	}
 
 	assertm(false, "Invalid PauseState value");
@@ -157,12 +157,12 @@ static bool is_valid_transition(const PauseState from, const PauseState to)
 
 	switch (from) {
 	case Running:
-		return to == UserPaused || to == FocusLossPaused;
+		return to == UserPaused || to == AutoPaused;
 
 	case UserPaused:
 		return to == Running;
 
-	case FocusLossPaused:
+	case AutoPaused:
 		return to == Running || to == UserPaused;
 	}
 
@@ -246,7 +246,7 @@ void DOSBOX_SetPauseState(const PauseState new_state)
 			return;
 		}
 
-		was_paused  = (prev == UserPaused || prev == FocusLossPaused);
+		was_paused  = (prev == UserPaused || prev == AutoPaused);
 		now_running = (new_state == Running);
 
 		pause_state.store(new_state);
@@ -260,10 +260,10 @@ void DOSBOX_SetPauseState(const PauseState new_state)
 
 	// Log + refresh the titlebar only on user-visible edges: pause
 	// becoming active or fully resumed. Owner-only transitions
-	// (`FocusLossPaused` -> `UserPaused`) skip both -- nothing the user
+	// (`AutoPaused` -> `UserPaused`) skip both -- nothing the user
 	// sees changes.
 	const bool now_paused = (new_state == UserPaused ||
-	                         new_state == FocusLossPaused);
+	                         new_state == AutoPaused);
 
 	if (now_paused != was_paused) {
 		TITLEBAR_RefreshTitle();
@@ -281,8 +281,8 @@ void DOSBOX_RequestUserPause()
 	using enum PauseState;
 
 	switch (DOSBOX_GetPauseState()) {
-	case Running:         DOSBOX_SetPauseState(UserPaused); break;
-	case FocusLossPaused: DOSBOX_SetPauseState(UserPaused); break;
+	case Running:    DOSBOX_SetPauseState(UserPaused); break;
+	case AutoPaused: DOSBOX_SetPauseState(UserPaused); break;
 
 	case UserPaused:
 		break;  // already user-paused
@@ -299,8 +299,8 @@ void DOSBOX_RequestUserResume()
 		break;
 
 	case Running:
-	case FocusLossPaused:
-		break;  // only the focus handler resumes focus-loss pauses
+	case AutoPaused:
+		break;  // only the focus handler resumes auto-pauses
 	}
 }
 
