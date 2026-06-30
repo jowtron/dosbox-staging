@@ -128,11 +128,31 @@ void Null_Init([[maybe_unused]] Section *sec) {
 // ---------------------------------------------------------------------------
 // Pause state machine
 //
-// Single source of truth. All transitions go through
-// `DOSBOX_SetPauseState()` (validated against `is_valid_transition()`).
-// Callers that want "user pressed the pause / resume button" semantics
-// use `DOSBOX_RequestUserPause()` / `DOSBOX_RequestUserResume()`.
+// Mirrors the structure of `MixerMuteState` in `audio/mixer.h` --
+// user-initiated state survives the auto path, only the auto path can
+// be auto-cleared.
+//
+// Three states:
+//   - `Running`: emulator core ticking normally.
+//   - `UserPaused`: user-initiated pause (hotkey or HTTP API).
+//   - `AutoPaused`: window-inactive auto-pause; only the auto-resume
+//     path clears this, leaving user-pauses alone.
+//
+// `AutoPaused` upgrades to `UserPaused` if the user hits the pause
+// hotkey while auto-paused -- it shouldn't auto-resume on focus gain
+// after that. The reverse never happens.
+//
+// Single source of truth. All transitions go through `set_pause_state()`
+// (validated against `is_valid_transition()`). Public callers express
+// intent via the four `DOSBOX_Request{User,Auto}{Pause,Resume}()`
+// helpers, never the raw setter.
 // ---------------------------------------------------------------------------
+
+enum class PauseState : uint8_t {
+	Running,
+	UserPaused,
+	AutoPaused,
+};
 
 static std::mutex pause_state_mutex;
 static std::atomic<PauseState> pause_state{PauseState::Running};
@@ -170,9 +190,19 @@ static bool is_valid_transition(const PauseState from, const PauseState to)
 	return false;
 }
 
-PauseState DOSBOX_GetPauseState()
+static PauseState get_pause_state()
 {
 	return pause_state.load();
+}
+
+bool DOSBOX_IsRunning()
+{
+	return get_pause_state() == PauseState::Running;
+}
+
+bool DOSBOX_IsPaused()
+{
+	return get_pause_state() != PauseState::Running;
 }
 
 // Idempotent subsystem pause hook driven by the FSM. Mapper UI doesn't
@@ -221,7 +251,7 @@ static void update_subsystem_pause_state()
 	set_subsystems_paused(DOSBOX_IsPaused());
 }
 
-void DOSBOX_SetPauseState(const PauseState new_state)
+static void set_pause_state(const PauseState new_state)
 {
 	using enum PauseState;
 
@@ -280,9 +310,9 @@ void DOSBOX_RequestUserPause()
 {
 	using enum PauseState;
 
-	switch (DOSBOX_GetPauseState()) {
-	case Running:    DOSBOX_SetPauseState(UserPaused); break;
-	case AutoPaused: DOSBOX_SetPauseState(UserPaused); break;
+	switch (get_pause_state()) {
+	case Running:    set_pause_state(UserPaused); break;
+	case AutoPaused: set_pause_state(UserPaused); break;
 
 	case UserPaused:
 		break;  // already user-paused
@@ -293,9 +323,9 @@ void DOSBOX_RequestUserResume()
 {
 	using enum PauseState;
 
-	switch (DOSBOX_GetPauseState()) {
+	switch (get_pause_state()) {
 	case UserPaused:
-		DOSBOX_SetPauseState(Running);
+		set_pause_state(Running);
 		break;
 
 	case Running:
@@ -308,8 +338,8 @@ void DOSBOX_RequestAutoPause()
 {
 	using enum PauseState;
 
-	switch (DOSBOX_GetPauseState()) {
-	case Running:    DOSBOX_SetPauseState(AutoPaused); break;
+	switch (get_pause_state()) {
+	case Running:    set_pause_state(AutoPaused); break;
 
 	case UserPaused:
 	case AutoPaused:
@@ -321,9 +351,9 @@ void DOSBOX_RequestAutoResume()
 {
 	using enum PauseState;
 
-	switch (DOSBOX_GetPauseState()) {
+	switch (get_pause_state()) {
 	case AutoPaused:
-		DOSBOX_SetPauseState(Running);
+		set_pause_state(Running);
 		break;
 
 	case Running:
@@ -698,7 +728,7 @@ void DOSBOX_RequestShutdown()
 	// from a known-running state. Without this, teardown would block on
 	// the mixer / synth threads that are parked in their pause hooks.
 	if (DOSBOX_IsPaused()) {
-		DOSBOX_SetPauseState(PauseState::Running);
+		set_pause_state(PauseState::Running);
 	}
 }
 

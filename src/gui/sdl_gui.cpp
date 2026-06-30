@@ -288,7 +288,7 @@ void GFX_RequestExit(const bool pressed)
 		DOSBOX_RequestUserPause();
 	}
 
-	// Titlebar refresh happens inside `DOSBOX_SetPauseState()` on the
+	// Titlebar refresh happens inside the pause FSM on the
 	// `Paused`/`Running` edge.
 }
 
