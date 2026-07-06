@@ -286,6 +286,12 @@ bool MIXER_FastForwardModeEnabled()
 // (mostly on device init/destroy and in the MIXER command line program).
 // Individual channels also have a mutex which can be safely aquired without
 // stopping these queues.
+//
+// NOTE: The queue `Stop()`/`Start()` protocol is not nesting-safe: a nested
+// lock/unlock pair would `Start()` the queues on the inner unlock while the
+// outer lock is still held. All current callers take the lock sequentially
+// (never nested), and the queue producers are non-blocking, so this is
+// harmless today -- but don't nest these calls.
 void MIXER_LockMixerThread()
 {
 	PCSPEAKER_NotifyLockMixer();
@@ -724,8 +730,8 @@ void MIXER_DeregisterChannel(MixerChannelPtr& channel_to_remove)
 	MIXER_UnlockMixerThread();
 }
 
-MixerChannelPtr MIXER_AddChannel(MIXER_Handler handler,
-                                 const int sample_rate_hz, const std::string& name,
+MixerChannelPtr MIXER_AddChannel(MIXER_Handler handler, const int sample_rate_hz,
+                                 const std::string& name,
                                  const std::set<ChannelFeature>& features)
 {
 	// We allow 0 for the UseMixerRate special value
@@ -737,7 +743,9 @@ MixerChannelPtr MIXER_AddChannel(MIXER_Handler handler,
 
 	const auto chan_rate_hz = chan->GetSampleRate();
 	if (chan_rate_hz == mixer.sample_rate_hz) {
-		LOG_MSG("%s: Operating at %d Hz without resampling", name.c_str(), chan_rate_hz);
+		LOG_MSG("%s: Operating at %d Hz without resampling",
+		        name.c_str(),
+		        chan_rate_hz);
 	} else {
 		LOG_MSG("%s: Operating at %d Hz and %s to the output rate",
 		        name.c_str(),
@@ -2180,8 +2188,8 @@ void MixerChannel::AddSamples(const int num_frames, const Type* data)
 			assert(s.pos >= 0.0f && s.pos <= 1.0f);
 			AudioFrame lerped_frame = {};
 			lerped_frame.left       = std::lerp(s.last_frame.left,
-			                                    curr_frame.left,
-			                                    s.pos);
+                                                      curr_frame.left,
+                                                      s.pos);
 
 			lerped_frame.right = std::lerp(s.last_frame.right,
 			                               curr_frame.right,
@@ -2610,7 +2618,7 @@ static void SDLCALL mixer_callback([[maybe_unused]] void* userdata,
 	constexpr int BytesPerAudioFrame = sizeof(AudioFrame);
 
 	const auto frames_requested = check_cast<size_t>(bytes_requested /
-	                                                  BytesPerAudioFrame);
+	                                                 BytesPerAudioFrame);
 
 	// Mac OSX has been observed to be problematic if we ever block inside
 	// SDL's callback. This ensures that we do not block waiting for more
@@ -2622,7 +2630,7 @@ static void SDLCALL mixer_callback([[maybe_unused]] void* userdata,
 	output.resize(frames_requested);
 
 	const auto frames_received = mixer.final_output.BulkDequeue(output.data(),
-	                                                             frames_to_dequeue);
+	                                                            frames_to_dequeue);
 	// Satisfy any shortfall with silence
 	std::fill(output.begin() + frames_received, output.end(), AudioFrame{});
 
@@ -2636,8 +2644,8 @@ static void SDLCALL mixer_callback([[maybe_unused]] void* userdata,
 	//
 	const bool should_silence = mixer_should_silence_output();
 
-	static float playback_gain  = 1.0f;
-	const float target_gain     = should_silence ? 0.0f : 1.0f;
+	static float playback_gain = 1.0f;
+	const float target_gain    = should_silence ? 0.0f : 1.0f;
 
 	constexpr float SmoothingMs = 5.0f;
 
@@ -2965,8 +2973,12 @@ void MIXER_RequestAutoUnmute()
 // thread can produce. `NotifyLockMixer()`'s `Stop()` unblocks `BulkDequeue()`
 // so the mixer thread can release the mutex.
 //
-// !!! ORDER MATTERS relative to MIDI_Pause/Resume. See the comments on
-// `set_subsystems_paused` in dosbox.cpp. !!!
+// `MIDI_Pause()` reaches into the same `MIXER_LockMixerThread()` lock to
+// drain in-flight `mix_samples()` BEFORE halting the synth renderer
+// (preventing a deadlock where the mixer is mid-`BulkDequeue()` on the
+// synth's `audio_frame_fifo` and the halted renderer can't produce more
+// samples). `mixer.mutex` is `std::recursive_mutex`, so the redundant
+// re-lock in the subsequent `MIXER_Pause()` is harmless.
 //
 void MIXER_Pause()
 {
@@ -3044,7 +3056,9 @@ static bool init_sdl_sound(const int requested_sample_rate_hz,
 
 	// Open the audio device
 	if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-		LOG_ERR("SDL: Failed to init SDL audio subsystem: %s", SDL_GetError());
+		LOG_ERR("SDL: Failed to init SDL audio subsystem: %s",
+		        SDL_GetError());
+
 		return false;
 	}
 
@@ -3095,7 +3109,7 @@ static bool init_sdl_sound(const int requested_sample_rate_hz,
 
 	// Set these mixer values after we've passed all error points.
 	mixer.sample_rate_hz = obtained_sample_rate_hz;
-	mixer.blocksize = obtained_blocksize;
+	mixer.blocksize      = obtained_blocksize;
 
 	const auto driver_name = SDL_GetCurrentAudioDriver();
 	const auto playback_name = SDL_GetAudioDeviceName(mixer.sdl_device);
@@ -3104,8 +3118,8 @@ static bool init_sdl_sound(const int requested_sample_rate_hz,
 	// Did SDL negotiate a different playback rate?
 	if (obtained_sample_rate_hz != requested_sample_rate_hz) {
 		LOG_WARNING("MIXER: SDL negotiated the requested sample rate of %d to %d Hz",
-		         requested_sample_rate_hz,
-		         obtained_sample_rate_hz);
+		            requested_sample_rate_hz,
+		            obtained_sample_rate_hz);
 
 		set_section_property_value("mixer",
 		                           "rate",
