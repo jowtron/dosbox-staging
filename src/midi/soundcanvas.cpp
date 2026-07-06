@@ -762,8 +762,9 @@ void MidiDeviceSoundCanvas::Render()
 	while (work_fifo.IsRunning()) {
 		if (is_paused.load(std::memory_order_acquire)) {
 			// Halt the synth so its internal clock doesn't advance
-			// past the pause edge. `audio_frame_fifo` is left intact;
-			// the mixer drains the pre-pause continuation on resume.
+			// past the pause edge. `audio_frame_fifo` is left
+			// intact; the mixer drains the pre-pause continuation
+			// on resume.
 			std::unique_lock lock(pause_mutex);
 
 			pause_cv.wait(lock, [this] {
