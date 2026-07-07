@@ -2689,6 +2689,37 @@ static float apply_fade(std::vector<AudioFrame>& buffer, float gain,
 	return gain;
 }
 
+// On resume, refill `final_output` to capacity with silence so the mixer
+// thread is back-pressured from its very first mixed block.
+//
+// While paused we produce nothing, so SDL drains `final_output` empty. If we
+// resumed straight into mixing, every `BulkEnqueue()` in the loop below would
+// find free space and return instantly -- the loop would spin at CPU speed
+// instead of real time until the queue refilled. Each spin also runs
+// `mix_samples()`, which feeds the capture queue, so that catch-up burst
+// dumps ~one bufferful of frames into the recording with no real time
+// elapsed, stretching captured audio by one buffer per pause/resume cycle.
+//
+// Pre-filling the queue makes the first real `BulkEnqueue()` block until SDL
+// asks for more, restoring real-time pacing immediately. The primed silence
+// is never captured (it bypasses `mix_samples()`) and is inaudible (the
+// resume fade-in plays over it).
+//
+// Runs on the mixer thread (the sole producer of `final_output`), keyed off
+// its own pause->resume edge, so there is no cross-thread race and no new
+// lock ordering.
+//
+static void prime_output_queue_on_resume()
+{
+	const auto capacity = mixer.final_output.MaxCapacity();
+
+	static std::vector<AudioFrame> silence = {};
+	silence.assign(capacity, AudioFrame{});
+
+	// Non-blocking: fills only the currently-free space and returns.
+	mixer.final_output.NonblockingBulkEnqueue(silence, capacity);
+}
+
 static void mixer_thread_loop()
 {
 	auto last_mixed = 0.0;
@@ -2701,6 +2732,10 @@ static void mixer_thread_loop()
 
 	const auto fade_step = compute_fade_step();
 
+	// Tracks the pause->resume edge so we re-prime `final_output` on resume;
+	// see `prime_output_queue_on_resume()`. Owned solely by this thread.
+	bool was_paused = false;
+
 	while (!mixer.thread_should_quit) {
 		std::unique_lock lock(mixer.mutex);
 
@@ -2711,32 +2746,41 @@ static void mixer_thread_loop()
 		// Pending -> Paused transition), so `playback_gain` is already
 		// at 0 and no further ramp is needed here.
 		if (DOSBOX_IsPaused()) {
+			was_paused = true;
 			lock.unlock();
 
-			if (mixer.no_sound) {
-				// No SDL device, no consumer for
-				// `final_output`. Just sleep to simulate the
-				// per-block duration; skipping the enqueue avoids
-				// filling and blocking the queue.
-				constexpr double NanosecondsPerMillisecond = 1000000.0;
+			// Don't feed `final_output` while paused. Once the
+			// queue drains, SDL backfills the audio device with
+			// silence on its own, so we just pace the loop by
+			// sleeping the per-block duration. This also covers
+			// `no_sound`, where there is no SDL consumer at all.
+			// We re-prime the queue on resume (below) to restore
+			// back-pressure.
+			constexpr double NanosecondsPerMillisecond = 1000000.0;
 
-				const auto expected_time =
-				        (static_cast<double>(mixer.blocksize) /
-				         static_cast<double>(mixer.sample_rate_hz)) *
-				        1000.0;
+			const auto expected_time =
+			        (static_cast<double>(mixer.blocksize) /
+			         static_cast<double>(mixer.sample_rate_hz)) *
+			        1000.0;
 
-				std::this_thread::sleep_for(std::chrono::nanoseconds(
-				        static_cast<uint64_t>(
-				                expected_time *
-				                NanosecondsPerMillisecond)));
-				continue;
-			}
-
-			// Enqueue silence to keep SDL fed. `playback_gain` is
-			// already 0 so no fade to apply.
-			mixer.output_buffer.assign(mixer.blocksize, AudioFrame{});
-			mixer.final_output.BulkEnqueue(mixer.output_buffer);
+			std::this_thread::sleep_for(std::chrono::nanoseconds(
+			        static_cast<uint64_t>(expected_time *
+			                              NanosecondsPerMillisecond)));
 			continue;
+		}
+
+		if (was_paused) {
+			// Just resumed. Re-establish back-pressure before
+			// mixing so we don't free-run a catch-up burst into the
+			// capture queue; see `prime_output_queue_on_resume()`.
+			// The queue op is non-blocking and self-synchronised,
+			// so we release `mixer.mutex` first, matching the
+			// enqueue path below.
+			was_paused = false;
+
+			lock.unlock();
+			prime_output_queue_on_resume();
+			lock.lock();
 		}
 
 		// This code is mostly for the fast-forward button (hold Alt + F12)
