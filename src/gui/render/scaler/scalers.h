@@ -13,12 +13,10 @@
 #define SCALER_MAX_MUL_WIDTH  2
 #define SCALER_MAX_MUL_HEIGHT 2
 
-constexpr uint16_t SCALER_MAXHEIGHT = 1200;
-constexpr uint16_t SCALER_MAXWIDTH  = 1600 + 30;
-//
-// The additional 30 pixels of width accommodates the full range that tweaked
-// text modes (such as Q200x25x8 used by Necromancer's DOS Navigator) are
-// capable of writing.
+// Increased to support HD resolutions (720p, 1080p, 1440p)
+// Values match DOSBox-X: src/gui/render_scalers.h
+constexpr uint16_t SCALER_MAXWIDTH  = 1920;
+constexpr uint16_t SCALER_MAXHEIGHT = 1440;
 
 
 #define SCALER_BLOCKSIZE	16
