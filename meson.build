@@ -426,6 +426,10 @@ git_hash = run_command(
 
 conf_data = configuration_data()
 conf_data.set('version', meson.project_version())
+
+# Major.minor only, e.g. '0.83' (used by DOSBOX_VERSION_SHORT)
+version_parts = meson.project_version().split('-')[0].split('.')
+conf_data.set('version_short', version_parts[0] + '.' + version_parts[1])
 conf_data.set('project_name', meson.project_name())
 conf_data.set('git_hash', git_hash)
 conf_data.set_quoted(
@@ -1158,6 +1162,7 @@ subdir('src/libs/decoders')
 subdir('src/libs/nuked')
 subdir('src/libs/ESFMu')
 subdir('src/libs/residfp')
+subdir('src/libs/riffcpp')
 subdir('src/libs/whereami')
 subdir('src/libs/YM7128B_emu')
 

@@ -65,6 +65,7 @@ libdos = static_library(
     libdos_sources,
     include_directories: incdir,
     dependencies: [
+        asio_dep,
         sdl2_dep,
         sdl2_image_dep,
         libdecoders_dep,

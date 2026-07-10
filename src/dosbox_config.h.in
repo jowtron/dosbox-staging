@@ -14,6 +14,9 @@
 // 0.81.1-alpha)
 #define DOSBOX_VERSION "@version@"
 
+// Current DOSBox Staging version, major.minor only (e.g., 0.83)
+#define DOSBOX_VERSION_SHORT "@version_short@"
+
 // Git hash of the build
 #define BUILD_GIT_HASH "@git_hash@"
 
@@ -41,6 +44,12 @@
 
 // The type of cpu this target has
 #mesondefine C_TARGETCPU
+
+// Define to 1 if the target CPU is x86 or x86-64
+#mesondefine C_TARGET_CPU_X86
+
+// Define to 1 if the target CPU is ARM (AArch64)
+#mesondefine C_TARGET_CPU_ARM
 
 // Define to 1 if target CPU supports unaligned memory access
 #mesondefine C_UNALIGNED_MEMORY

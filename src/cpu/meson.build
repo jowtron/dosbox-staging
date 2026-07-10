@@ -48,6 +48,12 @@ foreach line : core_selection
         conf_data.set('C_UNALIGNED_MEMORY', unaligned_mem)
         conf_data.set(dynrec_define, 1)
 
+        if ['X86', 'X86_64'].contains(target_cpu)
+            conf_data.set('C_TARGET_CPU_X86', 1)
+        elif target_cpu == 'ARMV8LE'
+            conf_data.set('C_TARGET_CPU_ARM', 1)
+        endif
+
         if per_page_w_or_x_pref.auto()
             conf_data.set('C_PER_PAGE_W_OR_X', per_page_w_or_x)
         endif

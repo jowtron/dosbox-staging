@@ -195,6 +195,7 @@ option(
         'opusfile',
         'png',
         'sdl2',
+        'sdl2_image',
         'sdl2_net',
         'slirp',
         'speexdsp',
