@@ -9,6 +9,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstring>
 
 #include "hardware/memory.h"
 #include "misc/support.h"
@@ -18,6 +19,21 @@ static constexpr auto NumSampleFramesInBuffer = 16 * 1024;
 
 static constexpr auto SampleFrameSize  = 4;
 static constexpr auto NumAudioChannels = 2;
+
+// The mixer delivers captured audio to us in producer-paced bursts, while
+// `capture_video_add_frame()` runs per emulated video frame -- two
+// independent clocks. Dumping every sample buffered since the last frame
+// into a single `01wb` chunk therefore yields wildly uneven per-frame audio.
+//
+// Instead we meter a fixed per-frame target out of the buffer and hold this
+// many sample frames in reserve, so short-term producer jitter is absorbed
+// by the reserve and the emitted chunks stay uniform. The cost is a constant
+// audio-behind-video interleave offset of roughly this many frames, which
+// demuxers reconcile from the stream's sample/frame counts. Sized well above
+// the mixer blocksize (1024 by default) and well below the 16K buffer
+// capacity so we neither underrun on jitter nor risk the overflow drop in
+// `capture_video_add_audio_data()`.
+static constexpr uint32_t AudioPrebufferFrames = 4 * 1024;
 
 static constexpr auto AviHeaderSize = 500;
 
@@ -43,6 +59,15 @@ static struct {
 		uint32_t sample_rate     = 0;
 		uint32_t buf_frames_used = 0;
 		uint32_t bytes_written   = 0;
+
+		// Fractional per-frame emit target; carries the sub-frame
+		// remainder (and any unmet demand from an underrun) between
+		// video frames. See `AudioPrebufferFrames`.
+		double frame_credit = 0.0;
+
+		// False until the reserve has first filled to
+		// `AudioPrebufferFrames`; gates the start of metered output.
+		bool primed = false;
 	} audio = {};
 } video = {};
 
@@ -119,6 +144,28 @@ static void add_avi_chunk(const char* tag, const uint32_t size,
 	host_writed(index + 12, size);
 }
 
+// Writes the first `num_frames` sample frames from the audio buffer as a
+// single `01wb` AVI chunk, then shifts any remaining frames down to the front
+// of the buffer. A no-op when `num_frames` is zero.
+static void write_audio_chunk(const uint32_t num_frames)
+{
+	assert(num_frames <= video.audio.buf_frames_used);
+	if (num_frames == 0) {
+		return;
+	}
+
+	add_avi_chunk("01wb", num_frames * SampleFrameSize, video.audio.buf, 0);
+	video.audio.bytes_written += num_frames * SampleFrameSize;
+
+	const auto remaining = video.audio.buf_frames_used - num_frames;
+	if (remaining > 0) {
+		memmove(video.audio.buf,
+		        video.audio.buf[num_frames],
+		        remaining * SampleFrameSize);
+	}
+	video.audio.buf_frames_used = remaining;
+}
+
 void capture_video_finalise()
 {
 	if (!video.handle) {
@@ -127,6 +174,11 @@ void capture_video_finalise()
 	if (video.codec) {
 		video.codec->FinishVideo();
 	}
+
+	// Flush all audio still held back by the per-frame prebuffer so the
+	// stream contains every produced sample. Must run before the header is
+	// built below, which reads `bytes_written` as the audio stream length.
+	write_audio_chunk(video.audio.buf_frames_used);
 
 	uint8_t avi_header[AviHeaderSize];
 	uint32_t header_pos = 0;
@@ -336,6 +388,8 @@ static void create_avi_file(const uint16_t width, const uint16_t height,
 	video.written               = 0;
 	video.audio.buf_frames_used = 0;
 	video.audio.bytes_written   = 0;
+	video.audio.frame_credit    = 0.0;
+	video.audio.primed          = false;
 }
 
 // Performs some transforms on the passed down rendered image to make sure
@@ -489,14 +543,32 @@ void capture_video_add_frame(const RenderedImage& image, const float frames_per_
 
 	//		LOG_MSG("CAPTURE: Frame %d video %d audio
 	//%d",video.frames, written, video.audio_buf_frames_used *4 );
-	if (video.audio.buf_frames_used) {
-		add_avi_chunk("01wb",
-		              video.audio.buf_frames_used * SampleFrameSize,
-		              video.audio.buf,
-		              0);
-
-		video.audio.bytes_written += video.audio.buf_frames_used *
-		                             SampleFrameSize;
-		video.audio.buf_frames_used = 0;
+	// Meter audio out evenly across video frames instead of dumping every
+	// sample that arrived since the last frame into one `01wb` chunk. We
+	// hold back a reserve (`AudioPrebufferFrames`) and emit a fixed
+	// per-frame target, so bursty producer output is smoothed into uniform
+	// chunks.
+	if (!video.audio.primed) {
+		if (video.audio.buf_frames_used < AudioPrebufferFrames) {
+			// Still building the reserve; nothing to emit yet.
+			return;
+		}
+		video.audio.primed = true;
 	}
+
+	video.audio.frame_credit += static_cast<double>(video.audio.sample_rate) /
+	                            video.frames_per_second;
+
+	auto frames_to_write = static_cast<uint32_t>(video.audio.frame_credit);
+
+	// Underrun (reserve exhausted by a long producer stall): emit whatever
+	// is available rather than padding with silence, keeping the captured
+	// stream bit-identical to what was produced. The unmet demand stays in
+	// `frame_credit` and drains once the producer catches up.
+	if (frames_to_write > video.audio.buf_frames_used) {
+		frames_to_write = video.audio.buf_frames_used;
+	}
+
+	video.audio.frame_credit -= frames_to_write;
+	write_audio_chunk(frames_to_write);
 }
