@@ -979,9 +979,10 @@ static void add_dosbox_config_section(const ConfigPtr& conf)
 
 	auto pbool = section->AddBool("allow_hd_vesa_modes", OnlyAtStart, true);
 	pbool->SetHelp(
-	        "Allow HD video modes (720p, 1080p, and 4:3 variants) to appear in the VESA\n"
-	        "mode list ('on' by default). This is unusual for real VESA BIOSes and may\n"
-	        "cause issues with DOS games that have trouble with long mode lists. Turn\n"
+	        "Allow extra HD and widescreen video modes (720x480 up to 1920x1440,\n"
+	        "including 720p and 1080p) to appear in the VESA mode list ('on' by\n"
+	        "default). These modes are not found on real VESA BIOSes and may cause\n"
+	        "issues with DOS games that have trouble with long mode lists. Turn\n"
 	        "this off if you experience problems.");
 
 	pbool = section->AddBool("vga_8dot_font", OnlyAtStart, false);
