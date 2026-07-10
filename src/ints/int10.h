@@ -301,8 +301,9 @@ struct Int10Data {
 
 	VesaModes vesa_modes = VesaModes::Compatible;
 
-	bool vesa_nolfb  = false;
-	bool vesa_oldvbe = false;
+	bool vesa_nolfb    = false;
+	bool vesa_oldvbe   = false;
+	bool vesa_hd_modes = true;
 };
 
 extern Int10Data int10;

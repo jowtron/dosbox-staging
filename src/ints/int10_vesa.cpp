@@ -819,6 +819,12 @@ void INT10_SetupVESA(void)
 				canuse_mode = true;
 			}
 		}
+
+		// Skip HD modes if disabled
+		if (!int10.vesa_hd_modes && (ModeList_VGA[i].special & HD_MODE)) {
+			canuse_mode = false;
+		}
+
 		if (ModeList_VGA[i].mode >= MinVesaBiosModeNumber && canuse_mode) {
 			if (!int10.vesa_oldvbe || ModeList_VGA[i].mode < 0x120) {
 				phys_writew(PhysicalMake(0xc000, int10.rom.used),
