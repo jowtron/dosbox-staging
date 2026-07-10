@@ -706,6 +706,8 @@ static void dosbox_realinit(SectionProp& section)
 		int10.vesa_modes = VesaModes::All;
 	}
 
+	int10.vesa_hd_modes = section.GetBool("allow_hd_vesa_modes");
+
 	VGA_SetRefreshRateMode(section.GetString("dos_rate"));
 
 	// Set the disk IO data rate
@@ -969,7 +971,14 @@ static void add_dosbox_config_section(const ConfigPtr& conf)
 	        "               modes available in this mode are often required by late '90s\n"
 	        "               demoscene productions.");
 
-	auto pbool = section->AddBool("vga_8dot_font", OnlyAtStart, false);
+	auto pbool = section->AddBool("allow_hd_vesa_modes", OnlyAtStart, true);
+	pbool->SetHelp(
+	        "Allow HD video modes (720p, 1080p, and 4:3 variants) to appear in the VESA\n"
+	        "mode list ('on' by default). This is unusual for real VESA BIOSes and may\n"
+	        "cause issues with DOS games that have trouble with long mode lists. Turn\n"
+	        "this off if you experience problems.");
+
+	pbool = section->AddBool("vga_8dot_font", OnlyAtStart, false);
 	pbool->SetHelp("Use 8-pixel-wide fonts on VGA adapters ('off' by default).");
 
 	pbool = section->AddBool("vga_render_per_scanline", OnlyAtStart, true);
