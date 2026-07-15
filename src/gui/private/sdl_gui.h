@@ -85,7 +85,7 @@
 //   image is centered and the overhanging areas are clipped.
 //
 
-enum class FullscreenMode { Standard, ForcedBorderless };
+enum class FullscreenMode { Standard, ForcedBorderless, Native };
 
 struct SDL_Block {
 	uint32_t start_event_id = UINT32_MAX;

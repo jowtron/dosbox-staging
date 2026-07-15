@@ -638,6 +638,71 @@ static void set_window_decorations()
 	}
 }
 
+// Switch the display to its native resolution when entering fullscreen so
+// the image is presented with 1:1 physical pixel mapping even when the
+// desktop runs at a scaled resolution (e.g., "More Space" scaled modes on
+// macOS, where the compositor's resampling of the whole desktop would
+// degrade shader output otherwise). The OS restores the desktop mode when
+// the program exits fullscreen or terminates.
+static void set_native_display_mode()
+{
+	assert(sdl.window);
+
+	int num_modes = 0;
+	SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(sdl.display_number,
+	                                                        &num_modes);
+	if (!modes) {
+		LOG_WARNING("SDL: Failed to get fullscreen display modes: %s",
+		            SDL_GetError());
+		return;
+	}
+
+	// We're after the mode that addresses the most physical pixels, as
+	// that's the one whose framebuffer matches the panel and therefore
+	// needs no resampling. A mode's pixel dimensions are its logical size
+	// scaled by its pixel density; on Retina displays the panel-resolution
+	// mode is typically a 2x one (e.g., 2056x1329 at 2x on a 4112x2658
+	// panel), so we must not restrict ourselves to modes with a pixel
+	// density of 1.0.
+	//
+	// Out of equally wide modes we prefer the shortest, which on notched
+	// MacBooks is the mode that fits below the camera housing. The mode
+	// list is sorted by refresh rate in descending order, so out of
+	// otherwise equal modes we keep the one with the highest refresh rate.
+	auto pixel_width = [](const SDL_DisplayMode* mode) {
+		return iroundf(static_cast<float>(mode->w) * mode->pixel_density);
+	};
+	auto pixel_height = [](const SDL_DisplayMode* mode) {
+		return iroundf(static_cast<float>(mode->h) * mode->pixel_density);
+	};
+
+	const SDL_DisplayMode* native_mode = nullptr;
+
+	for (auto i = 0; i < num_modes; ++i) {
+		const auto mode = modes[i];
+		if (!native_mode || pixel_width(mode) > pixel_width(native_mode) ||
+		    (pixel_width(mode) == pixel_width(native_mode) &&
+		     pixel_height(mode) < pixel_height(native_mode))) {
+			native_mode = mode;
+		}
+	}
+
+	if (native_mode) {
+		if (SDL_SetWindowFullscreenMode(sdl.window, native_mode)) {
+			LOG_MSG("SDL: Switching display to its native %dx%d mode in fullscreen",
+			        pixel_width(native_mode),
+			        pixel_height(native_mode));
+		} else {
+			LOG_WARNING("SDL: Failed to set native fullscreen mode: %s",
+			            SDL_GetError());
+		}
+	} else {
+		LOG_WARNING("SDL: No native display mode found; using standard fullscreen");
+	}
+
+	SDL_free(modes);
+}
+
 static void enter_fullscreen()
 {
 	assert(sdl.window);
@@ -685,9 +750,11 @@ static void enter_fullscreen()
 		maybe_log_display_properties();
 
 	} else {
-		const auto fullscreen = (sdl.fullscreen.mode == FullscreenMode::Standard);
+		if (sdl.fullscreen.mode == FullscreenMode::Native) {
+			set_native_display_mode();
+		}
 
-		if (!SDL_SetWindowFullscreen(sdl.window, fullscreen)) {
+		if (!SDL_SetWindowFullscreen(sdl.window, true)) {
 			LOG_WARNING("SDL: Failed to set fullscreen: %s", SDL_GetError());
 		}
 	}
@@ -730,6 +797,11 @@ static void exit_fullscreen()
 		if (!SDL_SetWindowFullscreen(sdl.window, false)) {
 			LOG_WARNING("SDL: Failed to exit fullscreen: %s", SDL_GetError());
 		}
+
+		// Clear any exclusive fullscreen mode so subsequent fullscreen
+		// entries start from the borderless default (the mode is set
+		// again on entry when 'fullscreen_mode = native').
+		SDL_SetWindowFullscreenMode(sdl.window, nullptr);
 
 		// On macOS, SDL_SetWindowSize() and SDL_SetWindowPosition()
 		// calls in fullscreen mode are no-ops, so we need to set the
@@ -1548,7 +1620,8 @@ static SDL_WindowFlags get_sdl_window_flags()
 			flags |= SDL_WINDOW_FULLSCREEN;
 			break;
 		case FullscreenMode::ForcedBorderless:
-			// no-op
+		case FullscreenMode::Native:
+			// handled in enter_fullscreen()
 			break;
 		default: assertm(false, "Invalid FullscreenMode");
 		}
@@ -1691,6 +1764,8 @@ static void configure_fullscreen_mode()
 		sdl.fullscreen.mode = FullscreenMode::Standard;
 	} else if (fullscreen_mode_pref == "forced-borderless") {
 		sdl.fullscreen.mode = FullscreenMode::ForcedBorderless;
+	} else if (fullscreen_mode_pref == "native") {
+		sdl.fullscreen.mode = FullscreenMode::Native;
 	}
 }
 
@@ -1968,8 +2043,7 @@ void GFX_InitAndStartGui()
 
 	TITLEBAR_ReadConfig();
 
-	if (sdl.is_fullscreen &&
-	    sdl.fullscreen.mode == FullscreenMode::ForcedBorderless) {
+	if (sdl.is_fullscreen && sdl.fullscreen.mode != FullscreenMode::Standard) {
 		enter_fullscreen();
 	}
 
@@ -2650,12 +2724,23 @@ static void init_sdl_config_settings(SectionProp& section)
 	        "                      on Windows, resulting in exclusive fullscreen. Forcing\n"
 	        "                      borderless mode might result in decreased performance\n"
 	        "                      and slightly worse frame pacing (e.g., scrolling in 2D\n"
-	        "                      games not appearing perfectly smooth).");
+	        "                      games not appearing perfectly smooth).\n");
+
+	pstring->SetOptionHelp(
+	        "native",
+	        "  native:             Switch the display to its native resolution in\n"
+	        "                      fullscreen mode. This guarantees 1:1 physical pixel\n"
+	        "                      mapping for shaders even when the desktop runs at a\n"
+	        "                      scaled resolution (e.g., 'More Space' scaled modes on\n"
+	        "                      macOS), at the cost of a display mode switch when\n"
+	        "                      entering fullscreen. The desktop resolution is restored\n"
+	        "                      on exit.");
 	pstring->SetValues({
 	        "standard",
 #ifdef WIN32
 	        "forced-borderless",
 #endif
+	        "native",
 	});
 
 	pstring->SetDeprecatedWithAlternateValue("desktop", "standard");
