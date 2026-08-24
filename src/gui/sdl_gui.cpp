@@ -4,6 +4,7 @@
 
 #include "private/sdl_gui.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -666,9 +667,7 @@ static void set_native_display_mode()
 	// density of 1.0.
 	//
 	// Out of equally wide modes we prefer the shortest, which on notched
-	// MacBooks is the mode that fits below the camera housing. The mode
-	// list is sorted by refresh rate in descending order, so out of
-	// otherwise equal modes we keep the one with the highest refresh rate.
+	// MacBooks is the mode that fits below the camera housing.
 	auto pixel_width = [](const SDL_DisplayMode* mode) {
 		return iroundf(static_cast<float>(mode->w) * mode->pixel_density);
 	};
@@ -676,22 +675,57 @@ static void set_native_display_mode()
 		return iroundf(static_cast<float>(mode->h) * mode->pixel_density);
 	};
 
-	const SDL_DisplayMode* native_mode = nullptr;
+	// Displays usually advertise the same resolution at several refresh
+	// rates, so we must pick one deliberately. Changing the refresh rate is
+	// not this setting's job: the rate the user picked is often deliberate
+	// and costs battery on laptops, and we already have 'vsync',
+	// 'presentation_mode' and 'dos_rate' for frame pacing. So we prefer a
+	// mode at the desktop's current refresh rate, and only fall back to
+	// another rate if the display doesn't offer one at that rate. The
+	// fallback takes the highest, as SDL sorts modes by refresh rate
+	// descending; that matters because displays also advertise rates well
+	// below any DOS refresh rate (e.g., the 48 and 50 Hz modes macOS offers
+	// for matching film and PAL content).
+	const auto* desktop_mode = SDL_GetDesktopDisplayMode(sdl.display_number);
 
-	for (auto i = 0; i < num_modes; ++i) {
-		const auto mode = modes[i];
-		if (!native_mode || pixel_width(mode) > pixel_width(native_mode) ||
-		    (pixel_width(mode) == pixel_width(native_mode) &&
-		     pixel_height(mode) < pixel_height(native_mode))) {
-			native_mode = mode;
+	auto matches_desktop_refresh_rate = [&](const SDL_DisplayMode* mode) {
+		if (!desktop_mode || desktop_mode->refresh_rate <= 0.0f) {
+			return true;
 		}
+		constexpr auto ToleranceHz = 0.5f;
+		return std::fabs(mode->refresh_rate - desktop_mode->refresh_rate) <
+		       ToleranceHz;
+	};
+
+	auto find_largest_mode = [&](const bool at_desktop_refresh_rate) {
+		const SDL_DisplayMode* largest = nullptr;
+
+		for (auto i = 0; i < num_modes; ++i) {
+			const auto mode = modes[i];
+			if (at_desktop_refresh_rate &&
+			    !matches_desktop_refresh_rate(mode)) {
+				continue;
+			}
+			if (!largest || pixel_width(mode) > pixel_width(largest) ||
+			    (pixel_width(mode) == pixel_width(largest) &&
+			     pixel_height(mode) < pixel_height(largest))) {
+				largest = mode;
+			}
+		}
+		return largest;
+	};
+
+	const SDL_DisplayMode* native_mode = find_largest_mode(true);
+	if (!native_mode) {
+		native_mode = find_largest_mode(false);
 	}
 
 	if (native_mode) {
 		if (SDL_SetWindowFullscreenMode(sdl.window, native_mode)) {
-			LOG_MSG("SDL: Switching display to its native %dx%d mode in fullscreen",
+			LOG_MSG("SDL: Switching display to its native %dx%d mode at %g Hz in fullscreen",
 			        pixel_width(native_mode),
-			        pixel_height(native_mode));
+			        pixel_height(native_mode),
+			        native_mode->refresh_rate);
 		} else {
 			LOG_WARNING("SDL: Failed to set native fullscreen mode: %s",
 			            SDL_GetError());
