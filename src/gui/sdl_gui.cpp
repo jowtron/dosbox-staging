@@ -4,6 +4,11 @@
 
 #include "private/sdl_gui.h"
 
+#ifdef MACOSX
+#include <CoreGraphics/CoreGraphics.h>
+#endif
+
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -710,6 +715,131 @@ static void set_window_decorations()
 	                              : SDL_FALSE);
 }
 
+#ifdef MACOSX
+// Ask the window to use the display's native resolution in exclusive
+// fullscreen so the image is presented with 1:1 physical pixel mapping even
+// when the desktop runs at a scaled resolution (e.g., "More Space" scaled
+// modes, where the compositor's resampling of the whole desktop would
+// degrade shader output otherwise). SDL2's display mode list has no notion
+// of pixel density (on Retina panels the panel-resolution modes are only
+// reachable through 2x HiDPI modes), so the mode is selected with
+// CoreGraphics by its true pixel dimensions and then matched back to an SDL
+// mode by its point dimensions. SDL restores the desktop mode on exiting
+// fullscreen, and the OS restores it if the program terminates.
+static void set_native_display_mode()
+{
+	assert(sdl.window);
+
+	auto display_id = CGMainDisplayID();
+	if (sdl.display_number > 0) {
+		CGDirectDisplayID displays[16] = {};
+		uint32_t num_displays          = 0;
+		if (CGGetActiveDisplayList(16, displays, &num_displays) ==
+		            kCGErrorSuccess &&
+		    static_cast<uint32_t>(sdl.display_number) < num_displays) {
+			display_id = displays[sdl.display_number];
+		}
+	}
+
+	const auto desktop_mode = CGDisplayCopyDisplayMode(display_id);
+	const auto desktop_refresh_rate_hz =
+	        desktop_mode ? CGDisplayModeGetRefreshRate(desktop_mode) : 0.0;
+
+	const CFStringRef keys[] = {kCGDisplayShowDuplicateLowResolutionModes};
+	const CFBooleanRef values[] = {kCFBooleanTrue};
+
+	const auto options = CFDictionaryCreate(
+	        kCFAllocatorDefault,
+	        reinterpret_cast<const void**>(const_cast<CFStringRef*>(keys)),
+	        reinterpret_cast<const void**>(const_cast<CFBooleanRef*>(values)),
+	        1,
+	        &kCFTypeDictionaryKeyCallBacks,
+	        &kCFTypeDictionaryValueCallBacks);
+
+	const auto modes = CGDisplayCopyAllDisplayModes(display_id, options);
+	if (options) {
+		CFRelease(options);
+	}
+	if (!modes) {
+		LOG_WARNING("SDL: Failed to get the display mode list; using standard fullscreen");
+		if (desktop_mode) {
+			CGDisplayModeRelease(desktop_mode);
+		}
+		return;
+	}
+
+	// We're after the mode that addresses the most physical pixels, as
+	// that's the one whose framebuffer matches the panel and therefore
+	// needs no resampling. Out of equally wide modes we prefer the
+	// shortest, which on notched MacBooks is the mode that fits below the
+	// camera housing. Changing the refresh rate is not this setting's
+	// job, so out of otherwise equal modes we prefer one at the desktop's
+	// current refresh rate and fall back to the highest rate on offer.
+	CGDisplayModeRef native_mode   = nullptr;
+	auto native_is_at_desktop_rate = false;
+
+	const auto num_modes = CFArrayGetCount(modes);
+
+	for (CFIndex i = 0; i < num_modes; ++i) {
+		const auto mode = static_cast<CGDisplayModeRef>(
+		        const_cast<void*>(CFArrayGetValueAtIndex(modes, i)));
+
+		const auto at_desktop_rate =
+		        (desktop_refresh_rate_hz <= 0.0) ||
+		        (std::fabs(CGDisplayModeGetRefreshRate(mode) -
+		                   desktop_refresh_rate_hz) < 0.5);
+
+		if (!native_mode) {
+			native_mode               = mode;
+			native_is_at_desktop_rate = at_desktop_rate;
+			continue;
+		}
+
+		const auto width      = CGDisplayModeGetPixelWidth(mode);
+		const auto height     = CGDisplayModeGetPixelHeight(mode);
+		const auto best_width = CGDisplayModeGetPixelWidth(native_mode);
+		const auto best_height = CGDisplayModeGetPixelHeight(native_mode);
+
+		const auto better = (width > best_width) ||
+		                    (width == best_width && height < best_height) ||
+		                    (width == best_width && height == best_height &&
+		                     at_desktop_rate && !native_is_at_desktop_rate);
+		if (better) {
+			native_mode               = mode;
+			native_is_at_desktop_rate = at_desktop_rate;
+		}
+	}
+
+	if (native_mode) {
+		// SDL2 identifies display modes by their point dimensions and
+		// integer refresh rate; it resolves this back to the
+		// CoreGraphics mode when entering exclusive fullscreen.
+		SDL_DisplayMode sdl_mode = {};
+		sdl_mode.w = check_cast<int>(CGDisplayModeGetWidth(native_mode));
+		sdl_mode.h = check_cast<int>(CGDisplayModeGetHeight(native_mode));
+		sdl_mode.refresh_rate = iround(
+		        CGDisplayModeGetRefreshRate(native_mode));
+
+		if (SDL_SetWindowDisplayMode(sdl.window, &sdl_mode) == 0) {
+			LOG_MSG("SDL: Switching display to its native %dx%d mode at %d Hz in fullscreen",
+			        check_cast<int>(CGDisplayModeGetPixelWidth(native_mode)),
+			        check_cast<int>(CGDisplayModeGetPixelHeight(native_mode)),
+			        sdl_mode.refresh_rate);
+		} else {
+			LOG_WARNING("SDL: Failed to set native fullscreen mode: %s",
+			            SDL_GetError());
+		}
+	} else {
+		LOG_WARNING("SDL: No native display mode found; using standard fullscreen");
+	}
+
+	CFRelease(modes);
+	if (desktop_mode) {
+		CGDisplayModeRelease(desktop_mode);
+	}
+}
+#endif
+
 static void enter_fullscreen()
 {
 	assert(sdl.window);
@@ -749,11 +879,18 @@ static void enter_fullscreen()
 		maybe_log_display_properties();
 
 	} else {
-		const auto mode = (sdl.fullscreen.mode == FullscreenMode::Standard)
-		                        ? SDL_WINDOW_FULLSCREEN_DESKTOP
-		                        : SDL_WINDOW_FULLSCREEN;
+		auto fullscreen_flag = SDL_WINDOW_FULLSCREEN_DESKTOP;
 
-		SDL_SetWindowFullscreen(sdl.window, mode); //-V2006
+		if (sdl.fullscreen.mode == FullscreenMode::Native) {
+#ifdef MACOSX
+			set_native_display_mode();
+			fullscreen_flag = SDL_WINDOW_FULLSCREEN;
+#else
+			// Fall back to the standard fullscreen mode
+#endif
+		}
+
+		SDL_SetWindowFullscreen(sdl.window, fullscreen_flag); //-V2006
 	}
 
 	// We need to disable transparency in fullscreen on macOS
@@ -789,6 +926,11 @@ static void exit_fullscreen()
 	} else {
 		constexpr auto WindowedMode = 0;
 		SDL_SetWindowFullscreen(sdl.window, WindowedMode);
+
+		// Clear any exclusive fullscreen display mode so subsequent
+		// fullscreen entries start from the default desktop mode (the
+		// mode is set again on entry when 'fullscreen_mode = native').
+		SDL_SetWindowDisplayMode(sdl.window, nullptr);
 
 		// On macOS, SDL_SetWindowSize() and SDL_SetWindowPosition()
 		// calls in fullscreen mode are no-ops, so we need to set the
@@ -1595,7 +1737,8 @@ static int get_sdl_window_flags()
 			flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 			break;
 		case FullscreenMode::ForcedBorderless:
-			// no-op
+		case FullscreenMode::Native:
+			// handled in enter_fullscreen()
 			break;
 		default: assertm(false, "Invalid FullscreenMode");
 		}
@@ -1705,6 +1848,8 @@ static void configure_fullscreen_mode()
 		sdl.fullscreen.mode = FullscreenMode::Standard;
 	} else if (fullscreen_mode_pref == "forced-borderless") {
 		sdl.fullscreen.mode = FullscreenMode::ForcedBorderless;
+	} else if (fullscreen_mode_pref == "native") {
+		sdl.fullscreen.mode = FullscreenMode::Native;
 	}
 }
 
@@ -1994,7 +2139,8 @@ void GFX_InitAndStartGui()
 	TITLEBAR_ReadConfig();
 
 	if (sdl.is_fullscreen &&
-	    sdl.fullscreen.mode == FullscreenMode::ForcedBorderless) {
+	    (sdl.fullscreen.mode == FullscreenMode::ForcedBorderless ||
+	     sdl.fullscreen.mode == FullscreenMode::Native)) {
 		enter_fullscreen();
 	}
 
@@ -2740,10 +2886,23 @@ static void init_sdl_config_settings(SectionProp& section)
 	        "                      borderless mode might result in decreased performance\n"
 	        "                      and slightly worse frame pacing (e.g., scrolling in 2D\n"
 	        "                      games not appearing perfectly smooth).");
+
+	pstring->SetOptionHelp(
+	        "native",
+	        "  native:             Switch the display to its native resolution in\n"
+	        "                      fullscreen mode (macOS only). This guarantees 1:1\n"
+	        "                      physical pixel mapping for shaders even when the desktop\n"
+	        "                      runs at a scaled resolution (e.g., 'More Space' scaled\n"
+	        "                      modes), at the cost of a display mode switch when\n"
+	        "                      entering fullscreen. The desktop resolution is restored\n"
+	        "                      on exit.");
 	pstring->SetValues({
 	        "standard",
 #ifdef WIN32
 	        "forced-borderless",
+#endif
+#ifdef MACOSX
+	        "native",
 #endif
 	});
 
