@@ -775,13 +775,43 @@ static void set_native_display_mode()
 		return;
 	}
 
-	// We're after the mode that addresses the most physical pixels, as
-	// that's the one whose framebuffer matches the panel and therefore
-	// needs no resampling. Out of equally wide modes we prefer the
-	// shortest, which on notched MacBooks is the mode that fits below the
-	// camera housing. Changing the refresh rate is not this setting's
-	// job, so out of otherwise equal modes we prefer one at the desktop's
-	// current refresh rate and fall back to the highest rate on offer.
+	// We're after the mode whose framebuffer matches the panel, so nothing
+	// is resampled on the way to the glass. We cannot simply take the
+	// largest mode on offer: macOS also lists "More Space" modes that
+	// render ABOVE the panel and downsample, and picking one of those
+	// makes us render into a framebuffer the display cannot show. That
+	// misleads everything sizing itself from the framebuffer, notably the
+	// CRT shaders, which choose their preset from how many rows they
+	// believe they have and then draw scanlines the panel cannot resolve.
+	// The panel's own timing carries an IOKit flag, so use its width as a
+	// ceiling.
+	//
+	// Out of equally wide modes we prefer the shortest, which on notched
+	// MacBooks is the mode that fits below the camera housing. Changing
+	// the refresh rate is not this setting's job, so out of otherwise
+	// equal modes we prefer one at the desktop's current refresh rate and
+	// fall back to the highest rate on offer.
+	auto panel_pixel_width = 0;
+	{
+		// kDisplayModeNativeFlag from IOKit/IOGraphicsTypes.h
+		constexpr uint32_t DisplayModeNativeFlag = 0x02000000;
+
+		for (CFIndex i = 0; i < CFArrayGetCount(modes); ++i) {
+			const auto mode = static_cast<CGDisplayModeRef>(
+			        const_cast<void*>(CFArrayGetValueAtIndex(modes, i)));
+
+			if (CGDisplayModeGetIOFlags(mode) & DisplayModeNativeFlag) {
+				panel_pixel_width = std::max(panel_pixel_width,
+				                             check_cast<int>(CGDisplayModeGetPixelWidth(
+				                                     mode)));
+			}
+		}
+		if (panel_pixel_width == 0) {
+			LOG_WARNING(
+			        "SDL: Could not identify the panel's native resolution; "
+			        "using the largest mode on offer");
+		}
+	}
 	CGDisplayModeRef native_mode   = nullptr;
 	auto native_is_at_desktop_rate = false;
 
@@ -790,6 +820,12 @@ static void set_native_display_mode()
 	for (CFIndex i = 0; i < num_modes; ++i) {
 		const auto mode = static_cast<CGDisplayModeRef>(
 		        const_cast<void*>(CFArrayGetValueAtIndex(modes, i)));
+
+		if (panel_pixel_width > 0 &&
+		    check_cast<int>(CGDisplayModeGetPixelWidth(mode)) >
+		            panel_pixel_width) {
+			continue;
+		}
 
 		const auto at_desktop_rate =
 		        (desktop_refresh_rate_hz <= 0.0) ||
