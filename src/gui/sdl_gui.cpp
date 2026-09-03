@@ -4,6 +4,10 @@
 
 #include "private/sdl_gui.h"
 
+#ifdef MACOSX
+#include <CoreGraphics/CoreGraphics.h>
+#endif
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -658,16 +662,74 @@ static void set_native_display_mode()
 		return;
 	}
 
-	// We're after the mode that addresses the most physical pixels, as
-	// that's the one whose framebuffer matches the panel and therefore
-	// needs no resampling. A mode's pixel dimensions are its logical size
-	// scaled by its pixel density; on Retina displays the panel-resolution
-	// mode is typically a 2x one (e.g., 2056x1329 at 2x on a 4112x2658
-	// panel), so we must not restrict ourselves to modes with a pixel
-	// density of 1.0.
+	// We're after the mode whose framebuffer matches the panel, so nothing
+	// is resampled on the way to the glass. A mode's pixel dimensions are
+	// its logical size scaled by its pixel density; on Retina displays the
+	// panel-resolution mode is typically a 2x one (e.g., 1728x1117 at 2x on
+	// a 3456x2234 panel), so we must not restrict ourselves to modes with a
+	// pixel density of 1.0.
+	//
+	// Nor can we simply take the largest mode on offer: macOS also lists
+	// "More Space" modes that render ABOVE the panel and downsample, and
+	// picking one of those makes us render into a framebuffer bigger than
+	// the display can show. That is merely wasteful for a still image, but
+	// it also misleads everything that sizes itself from the framebuffer:
+	// the CRT shaders pick their preset from how many rows they believe
+	// they have, so they end up drawing scanlines the panel cannot resolve.
+	// The panel's own timing carries an IOKit flag, so ask for that and
+	// treat its width as the ceiling.
 	//
 	// Out of equally wide modes we prefer the shortest, which on notched
 	// MacBooks is the mode that fits below the camera housing.
+	const auto panel_pixel_width = [] {
+		// kDisplayModeNativeFlag from IOKit/IOGraphicsTypes.h
+		constexpr uint32_t DisplayModeNativeFlag = 0x02000000;
+
+		auto width = 0;
+
+		const CFStringRef keys[] = {kCGDisplayShowDuplicateLowResolutionModes};
+		const CFBooleanRef values[] = {kCFBooleanTrue};
+
+		const auto options = CFDictionaryCreate(
+		        kCFAllocatorDefault,
+		        reinterpret_cast<const void**>(const_cast<CFStringRef*>(keys)),
+		        reinterpret_cast<const void**>(
+		                const_cast<CFBooleanRef*>(values)),
+		        1,
+		        &kCFTypeDictionaryKeyCallBacks,
+		        &kCFTypeDictionaryValueCallBacks);
+
+		const auto cg_modes = CGDisplayCopyAllDisplayModes(CGMainDisplayID(),
+		                                                   options);
+		if (options) {
+			CFRelease(options);
+		}
+		if (!cg_modes) {
+			return width;
+		}
+
+		const auto num_cg_modes = CFArrayGetCount(cg_modes);
+
+		for (CFIndex i = 0; i < num_cg_modes; ++i) {
+			const auto mode = static_cast<CGDisplayModeRef>(
+			        const_cast<void*>(
+			                CFArrayGetValueAtIndex(cg_modes, i)));
+
+			if (CGDisplayModeGetIOFlags(mode) & DisplayModeNativeFlag) {
+				width = std::max(width,
+				                 check_cast<int>(CGDisplayModeGetPixelWidth(
+				                         mode)));
+			}
+		}
+		CFRelease(cg_modes);
+		return width;
+	}();
+
+	if (panel_pixel_width == 0) {
+		LOG_WARNING(
+		        "SDL: Could not identify the panel's native resolution; "
+		        "using the largest mode on offer");
+	}
 	auto pixel_width = [](const SDL_DisplayMode* mode) {
 		return iroundf(static_cast<float>(mode->w) * mode->pixel_density);
 	};
@@ -704,6 +766,10 @@ static void set_native_display_mode()
 			const auto mode = modes[i];
 			if (at_desktop_refresh_rate &&
 			    !matches_desktop_refresh_rate(mode)) {
+				continue;
+			}
+			if (panel_pixel_width > 0 &&
+			    pixel_width(mode) > panel_pixel_width) {
 				continue;
 			}
 			if (!largest || pixel_width(mode) > pixel_width(largest) ||
