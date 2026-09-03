@@ -716,6 +716,13 @@ static void set_window_decorations()
 }
 
 #ifdef MACOSX
+// The desktop mode we switched away from, so 'native' fullscreen can put it
+// back on exit.
+static struct {
+	CGDisplayModeRef desktop_mode = nullptr;
+	CGDirectDisplayID display_id  = 0;
+} native_fullscreen = {};
+
 // Ask the window to use the display's native resolution in exclusive
 // fullscreen so the image is presented with 1:1 physical pixel mapping even
 // when the desktop runs at a scaled resolution (e.g., "More Space" scaled
@@ -741,7 +748,7 @@ static void set_native_display_mode()
 		}
 	}
 
-	const auto desktop_mode = CGDisplayCopyDisplayMode(display_id);
+	auto desktop_mode = CGDisplayCopyDisplayMode(display_id);
 	const auto desktop_refresh_rate_hz =
 	        desktop_mode ? CGDisplayModeGetRefreshRate(desktop_mode) : 0.0;
 
@@ -811,23 +818,32 @@ static void set_native_display_mode()
 	}
 
 	if (native_mode) {
-		// SDL2 identifies display modes by their point dimensions and
-		// integer refresh rate; it resolves this back to the
-		// CoreGraphics mode when entering exclusive fullscreen.
-		SDL_DisplayMode sdl_mode = {};
-		sdl_mode.w = check_cast<int>(CGDisplayModeGetWidth(native_mode));
-		sdl_mode.h = check_cast<int>(CGDisplayModeGetHeight(native_mode));
-		sdl_mode.refresh_rate = iround(
-		        CGDisplayModeGetRefreshRate(native_mode));
+		// Switch the mode ourselves instead of letting SDL do it via an
+		// exclusive fullscreen window. SDL captures every display when
+		// it changes a mode, which stops the window server compositing
+		// normally: Spaces, Mission Control and the trackpad gestures
+		// all stop working, and the captured display leaves a border
+		// around our window. Switching here and then asking for plain
+		// borderless fullscreen keeps the window in its Space, so the
+		// desktop behaves exactly as it does in the standard mode.
+		const auto result = CGDisplaySetDisplayMode(display_id,
+		                                            native_mode,
+		                                            nullptr);
+		if (result == kCGErrorSuccess) {
+			native_fullscreen.display_id = display_id;
 
-		if (SDL_SetWindowDisplayMode(sdl.window, &sdl_mode) == 0) {
-			LOG_MSG("SDL: Switching display to its native %dx%d mode at %d Hz in fullscreen",
+			if (!native_fullscreen.desktop_mode) {
+				native_fullscreen.desktop_mode = desktop_mode;
+				desktop_mode                   = nullptr;
+			}
+
+			LOG_MSG("SDL: Switching display to its native %dx%d mode at %g Hz in fullscreen",
 			        check_cast<int>(CGDisplayModeGetPixelWidth(native_mode)),
 			        check_cast<int>(CGDisplayModeGetPixelHeight(native_mode)),
-			        sdl_mode.refresh_rate);
+			        CGDisplayModeGetRefreshRate(native_mode));
 		} else {
-			LOG_WARNING("SDL: Failed to set native fullscreen mode: %s",
-			            SDL_GetError());
+			LOG_WARNING("SDL: Failed to set native fullscreen mode (CoreGraphics error %d)",
+			            static_cast<int>(result));
 		}
 	} else {
 		LOG_WARNING("SDL: No native display mode found; using standard fullscreen");
@@ -837,6 +853,23 @@ static void set_native_display_mode()
 	if (desktop_mode) {
 		CGDisplayModeRelease(desktop_mode);
 	}
+}
+
+// Put the desktop back the way we found it after a 'native' fullscreen
+// session. Safe to call when no mode change is outstanding.
+static void restore_desktop_display_mode()
+{
+	if (!native_fullscreen.desktop_mode) {
+		return;
+	}
+
+	CGDisplaySetDisplayMode(native_fullscreen.display_id,
+	                        native_fullscreen.desktop_mode,
+	                        nullptr);
+
+	CGDisplayModeRelease(native_fullscreen.desktop_mode);
+	native_fullscreen.desktop_mode = nullptr;
+	native_fullscreen.display_id   = 0;
 }
 #endif
 
@@ -879,18 +912,16 @@ static void enter_fullscreen()
 		maybe_log_display_properties();
 
 	} else {
-		auto fullscreen_flag = SDL_WINDOW_FULLSCREEN_DESKTOP;
-
 		if (sdl.fullscreen.mode == FullscreenMode::Native) {
 #ifdef MACOSX
 			set_native_display_mode();
-			fullscreen_flag = SDL_WINDOW_FULLSCREEN;
-#else
-			// Fall back to the standard fullscreen mode
 #endif
 		}
 
-		SDL_SetWindowFullscreen(sdl.window, fullscreen_flag); //-V2006
+		// Always borderless: the 'native' mode has already switched the
+		// display itself, so SDL only needs to cover it.
+		SDL_SetWindowFullscreen(sdl.window,
+		                        SDL_WINDOW_FULLSCREEN_DESKTOP); //-V2006
 	}
 
 	// We need to disable transparency in fullscreen on macOS
@@ -927,10 +958,9 @@ static void exit_fullscreen()
 		constexpr auto WindowedMode = 0;
 		SDL_SetWindowFullscreen(sdl.window, WindowedMode);
 
-		// Clear any exclusive fullscreen display mode so subsequent
-		// fullscreen entries start from the default desktop mode (the
-		// mode is set again on entry when 'fullscreen_mode = native').
-		SDL_SetWindowDisplayMode(sdl.window, nullptr);
+#ifdef MACOSX
+		restore_desktop_display_mode();
+#endif
 
 		// On macOS, SDL_SetWindowSize() and SDL_SetWindowPosition()
 		// calls in fullscreen mode are no-ops, so we need to set the
@@ -1393,6 +1423,11 @@ static void gui_destroy()
 	if (sdl.draw.callback) {
 		(sdl.draw.callback)(GFX_CallbackStop);
 	}
+
+#ifdef MACOSX
+	// Quitting straight from 'native' fullscreen skips exit_fullscreen()
+	restore_desktop_display_mode();
+#endif
 }
 
 void GFX_Destroy()
