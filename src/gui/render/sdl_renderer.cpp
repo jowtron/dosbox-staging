@@ -223,6 +223,14 @@ void SdlRenderer::NotifyRenderSizeChanged(const int render_width_px,
 		}
 		break;
 
+	case TextureFilterMode::Sharp:
+		if (!SDL_SetTextureScaleMode(texture,
+		                            SDL_ScaleMode::SDL_SCALEMODE_PIXELART)) {
+			LOG_ERR("SDL: Error setting texture filtering mode: %s",
+			        SDL_GetError());
+		}
+		break;
+
 	default: assertm(false, "Invalid TextureFilterMode"); return;
 	}
 

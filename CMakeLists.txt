@@ -166,6 +166,14 @@ include(GNUInstallDirs)
 if (WIN32)
   set(DOSBOX_PLATFORM_WINDOWS ON)
 
+elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # iOS shares most of the macOS code paths (CoreFoundation, CoreMIDI, POSIX
+  # filesystem), so MACOSX stays defined and DOSBOX_PLATFORM_IOS marks the
+  # places where the two differ.
+  set(DOSBOX_PLATFORM_IOS ON)
+  set(DOSBOX_PLATFORM_MACOS ON)
+  set(MACOSX ON)
+
 elseif (APPLE)
   set(DOSBOX_PLATFORM_MACOS ON)
   set(MACOSX ON)
@@ -309,7 +317,13 @@ elseif (CMAKE_SYSTEM_PROCESSOR  STREQUAL "arm64"   OR
   set(C_TARGET_CPU_ARM    ON)
 
   set(C_DYNAMIC_X86      OFF)
-  set(C_DYNREC           ON)
+  # iOS forbids generating executable code at runtime outside of a debugger,
+  # so only the interpreter cores are available there
+  if (DOSBOX_PLATFORM_IOS)
+    set(C_DYNREC         OFF)
+  else()
+    set(C_DYNREC         ON)
+  endif()
   set(C_FPU_X86          OFF)
   set(C_UNALIGNED_MEMORY OFF)
 
@@ -404,6 +418,10 @@ endif()
 # Linux
 set(C_ALSA "${DOSBOX_PLATFORM_LINUX}")
 
+if (DOSBOX_PLATFORM_MACOS AND NOT DOSBOX_PLATFORM_IOS)
+  set(C_COREAUDIO ON)
+endif()
+
 # Windows
 if (DOSBOX_PLATFORM_WINDOWS)
   # Prevent <windows.h> from clobbering std::min and std::max
@@ -488,7 +506,9 @@ find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3)
 find_package(SDL3_image CONFIG REQUIRED)
 find_package(iir REQUIRED)
 find_package(PNG REQUIRED)
-find_package(OpenGL REQUIRED)
+if (NOT DOSBOX_PLATFORM_IOS)
+  find_package(OpenGL REQUIRED)
+endif()
 find_package(FluidSynth REQUIRED CONFIG)
 if (C_ALSA)
   find_package(ALSA REQUIRED)
@@ -582,6 +602,35 @@ target_link_libraries(dosbox PRIVATE
   dosboxcommon
   SDL3::Headers
 )
+
+if (DOSBOX_PLATFORM_IOS)
+  set(DOSBOX_IOS_BUNDLE_ID "app.jderrick.dospad" CACHE STRING "iOS bundle identifier")
+
+  set_target_properties(dosbox PROPERTIES
+    MACOSX_BUNDLE ON
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/extras/ios/Info.plist.in"
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${DOSBOX_IOS_BUNDLE_ID}"
+    XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
+    XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+    XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
+  )
+
+  # The asset catalog holds the app icon; Xcode compiles it into the bundle
+  set(IOS_ASSET_CATALOG "${CMAKE_SOURCE_DIR}/extras/ios/Assets.xcassets")
+  target_sources(dosbox PRIVATE "${IOS_ASSET_CATALOG}")
+  set_source_files_properties("${IOS_ASSET_CATALOG}" PROPERTIES
+    MACOSX_PACKAGE_LOCATION Resources
+  )
+  set_property(TARGET dosbox APPEND PROPERTY RESOURCE "${IOS_ASSET_CATALOG}")
+
+  # iOS bundles are flat, so resources go in <app>/assets. Not 'Resources':
+  # codesign mistakes a top-level 'Resources' for a macOS bundle and fails.
+  add_custom_command(TARGET dosbox POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/${RESOURCE_COPY_PATH}"
+            "$<TARGET_BUNDLE_DIR:dosbox>/assets"
+  )
+endif()
 
 # Export dynamic symbols so loguru's stack traces can resolve names
 if (HAS_STACK_INCLUDES)

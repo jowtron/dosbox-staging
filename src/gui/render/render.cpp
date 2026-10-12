@@ -668,7 +668,8 @@ void RENDER_SetSize(const ImageInfo& image_info, const double frames_per_second)
 // Double-scan VGA modes and pixel-double all video modes by default unless:
 //
 //  1) Single scanning or no pixel doubling is requested by the OpenGL shader.
-//  2) The interpolation mode is nearest-neighbour in texture output mode.
+//  2) The interpolation mode is nearest-neighbour or sharp in texture output
+//     mode.
 //
 // The default `interpolation/sharp.glsl` and `interpolation/nearest.glsl`
 // shaders requests both single scanning and no pixel doubling because it scales
@@ -687,11 +688,12 @@ void RENDER_SetScanAndPixelDoubling()
 
 	switch (GFX_GetRenderBackendType()) {
 	case RenderBackendType::Sdl: {
-		const auto nearest_neighbour_on = (GFX_GetTextureFilterMode() ==
-		                                   TextureFilterMode::NearestNeighbour);
+		// Sharp scaling also draws source pixels as flat rectangles
+		const auto flat_pixels_on = (GFX_GetTextureFilterMode() !=
+		                             TextureFilterMode::Bilinear);
 
-		force_vga_single_scan   = nearest_neighbour_on;
-		force_no_pixel_doubling = nearest_neighbour_on;
+		force_vga_single_scan   = flat_pixels_on;
+		force_no_pixel_doubling = flat_pixels_on;
 	} break;
 
 	case RenderBackendType::OpenGl: {

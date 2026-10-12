@@ -18,19 +18,29 @@ target_sources(dosboxcommon PRIVATE
   render/shader_pragma_parser.cpp
 )
 
-if(APPLE)
+if(APPLE AND NOT DOSBOX_PLATFORM_IOS)
 target_sources(dosboxcommon PRIVATE
   macos_window.mm
   render/macos_colorspace.mm
 )
 endif()
 
+if (DOSBOX_PLATFORM_IOS)
+  target_sources(dosboxcommon PRIVATE ios/touch_overlay.mm)
+  set_source_files_properties(ios/touch_overlay.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  target_link_libraries(dosboxcommon PRIVATE "-framework UIKit")
+endif()
+
 if (OPT_DEBUGGER)
   target_link_libraries(dosboxcommon PRIVATE imgui::imgui)
 endif()
 
-target_link_libraries(dosboxcommon PRIVATE OpenGL::GL simpleini)
+target_link_libraries(dosboxcommon PRIVATE simpleini)
 
-if (C_OPENGL)
-  target_link_libraries(dosboxcommon PRIVATE glad)
+if (TARGET OpenGL::GL)
+  target_link_libraries(dosboxcommon PRIVATE OpenGL::GL)
 endif()
+
+# The shader pipeline includes glad headers even when the OpenGL backend is
+# disabled; glad resolves GL functions at runtime, so linking it is harmless
+target_link_libraries(dosboxcommon PRIVATE glad)

@@ -18,7 +18,9 @@ elseif (DOSBOX_PLATFORM_MACOS)
   target_link_libraries(dosboxcommon PRIVATE "-framework CoreMIDI")
 
   # macOS-only CoreAudio MIDI backend
-  target_sources(dosboxcommon PRIVATE coreaudio.cpp)
+  if (C_COREAUDIO)
+    target_sources(dosboxcommon PRIVATE coreaudio.cpp)
+  endif()
 endif()
 
 # Linux-only ALSA MIDI backend

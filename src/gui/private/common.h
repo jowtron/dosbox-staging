@@ -76,7 +76,10 @@ class RenderBackend;
 
 RenderBackend* GFX_GetRenderer();
 
-enum class TextureFilterMode { NearestNeighbour, Bilinear };
+// 'Sharp' is SDL's pixel-art scaling: nearest-neighbour with only the edges
+// between source pixels blended, so non-integer scale factors stay even. It is
+// only available in texture output mode.
+enum class TextureFilterMode { NearestNeighbour, Bilinear, Sharp };
 
 // Might return nullptr if the window doesn't exist yet
 SDL_Window* GFX_GetWindow();

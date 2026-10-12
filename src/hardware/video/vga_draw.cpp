@@ -3181,9 +3181,17 @@ ImageInfo setup_drawing()
 	const auto final_render_width = (render_width * (double_width ? 2 : 1));
 	const auto final_render_height = (render_height * (double_height ? 2 : 1));
 
+	// A resize can run while the CRTC is half-programmed (INT 10h clears
+	// all the CRTC registers before setting up a new mode, and under
+	// Windows each of those port writes is trapped and runs the emulator),
+	// so either dimension can be zero here. Dividing by zero is undefined
+	// behaviour; on arm64 it silently yields zero, which sent the inlined
+	// std::gcd below into an endless loop.
 	const auto render_per_video_mode_scale =
-	        Fraction(final_render_width / video_mode.width,
-	                 final_render_height / video_mode.height);
+	        (video_mode.width > 0 && video_mode.height > 0)
+	                ? Fraction(final_render_width / video_mode.width,
+	                           final_render_height / video_mode.height)
+	                : Fraction(1);
 
 	switch (RENDER_GetAspectRatioCorrectionMode()) {
 	case AspectRatioCorrectionMode::Auto:

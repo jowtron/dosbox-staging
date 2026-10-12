@@ -596,6 +596,13 @@ int main(int argc, char* argv[])
 	// Ensure we perform SDL cleanup and restore console settings at exit
 	atexit(quit_func);
 
+#if defined(DOSBOX_PLATFORM_IOS)
+	// Start in the app's Documents folder, which the user can reach from the
+	// Files app, so a 'dosbox.conf' placed there is loaded as the local config
+	std::error_code ec;
+	std_fs::current_path(resolve_home("~/Documents"), ec);
+#endif
+
 	CommandLine command_line(argc, argv);
 	control = std::make_unique<Config>(&command_line);
 
@@ -613,6 +620,17 @@ int main(int argc, char* argv[])
 	// Set up logging after command line was parsed and trivial arguments
 	// have been handled.
 	init_logger(*arguments, argc, argv);
+
+#if defined(DOSBOX_PLATFORM_IOS)
+	// There's no terminal on a device, so also keep the log in Documents
+	// (reachable from the Files app). The previous run's log is kept as
+	// 'dosbox-log-prev.txt', so a log survives the relaunch after a hang.
+	{
+		std::error_code log_ec;
+		std_fs::rename("dosbox-log.txt", "dosbox-log-prev.txt", log_ec);
+		loguru::add_file("dosbox-log.txt", loguru::Truncate, loguru::Verbosity_INFO);
+	}
+#endif
 
 	const auto version_string = DOSBOX_GetDetailedVersion();
 

@@ -18,7 +18,9 @@
 #include "private/soundcanvas.h"
 
 #if defined(MACOSX)
+#if C_COREAUDIO
 #include "private/coreaudio.h"
+#endif
 #include "private/coremidi.h"
 
 #elif defined(WIN32)
@@ -101,9 +103,11 @@ static std::unique_ptr<MidiDevice> create_device(
 	if (name == CoreMidi) {
 		return std::make_unique<MidiDeviceCoreMidi>(config.c_str());
 	}
+#if C_COREAUDIO
 	if (name == CoreAudio) {
 		return std::make_unique<MidiDeviceCoreAudio>(config.c_str());
 	}
+#endif
 #endif
 #if defined(WIN32)
 	if (name == Win32) {
@@ -765,12 +769,14 @@ void MIDI_ListDevices(MoreOutputStrings& output)
 	                             : nullptr,
 	                     output);
 
+#if C_COREAUDIO
 	write_device_name(MidiDeviceName::CoreAudio);
 
 	COREAUDIO_ListDevices((device_name == MidiDeviceName::CoreAudio)
 	                              ? dynamic_cast<MidiDeviceCoreAudio*>(device_ptr)
 	                              : nullptr,
 	                      output);
+#endif
 #elif defined(WIN32)
 	write_device_name(MidiDeviceName::Win32);
 
@@ -901,7 +907,7 @@ static void init_mididevice_settings(SectionProp& secprop)
 	str_prop->SetOptionHelp("none", "  none:         Disable MIDI output.");
 
 	str_prop->SetValues({MidiDevicePortPref,
-#if defined(MACOSX)
+#if C_COREAUDIO
 	                     MidiDeviceName::CoreAudio,
 #endif
 
@@ -960,7 +966,7 @@ static void init_midiconfig_settings(SectionProp& secprop)
 #if (defined(MACOSX) || defined(WIN32))
 	        "windows_or_macos",
 #endif
-#if defined(MACOSX)
+#if C_COREAUDIO
 	        "coreaudio",
 #endif
 #if C_ALSA

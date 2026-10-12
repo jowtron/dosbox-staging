@@ -314,6 +314,10 @@ const std::vector<std_fs::path>& get_resource_parent_paths()
 #if defined(MACOSX)
 	constexpr auto macos_resource_dir_name = "Resources";
 	maybe_add_path(get_executable_path() / ".." / macos_resource_dir_name, paths);
+#	if defined(DOSBOX_PLATFORM_IOS)
+	// iOS app bundles are flat: <app>/assets sits next to the executable
+	maybe_add_path(get_executable_path() / "assets", paths);
+#	endif
 #else
 	maybe_add_path(get_executable_path() / resource_dir_name, paths);
 	maybe_add_path(get_executable_path() / ".." / resource_dir_name, paths);

@@ -1,0 +1,1215 @@
+// SPDX-FileCopyrightText:  2026-2026 The DOSBox Staging Team
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "gui/ios/touch_overlay.h"
+
+#include "hardware/memory.h"
+#include "ints/bios.h"
+
+#import <UIKit/UIKit.h>
+
+#include <algorithm>
+#include <vector>
+
+// The overlay feeds the emulator plain SDL events, so everything downstream
+// (the mapper, the keyboard and mouse emulation) treats it exactly like a
+// hardware keyboard and mouse.
+
+namespace {
+
+SDL_Window* sdl_window = nullptr;
+
+float cursor_x = 0.0f;
+float cursor_y = 0.0f;
+
+SDL_MouseButtonFlags mouse_buttons = 0;
+
+// Finger movement in points is multiplied by this to get mouse movement
+constexpr float TrackpadSpeed = 1.5f;
+
+// DOS programs often poll the button state rather than counting presses, so
+// a tap holds the button down long enough to be seen
+constexpr int64_t ClickDurationNs = 60'000'000;
+
+void push_key(const SDL_Scancode scancode, const bool down)
+{
+	SDL_Event event = {};
+
+	event.type         = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+	event.key.timestamp = SDL_GetTicksNS();
+	event.key.windowID  = SDL_GetWindowID(sdl_window);
+	event.key.scancode  = scancode;
+	event.key.key       = SDL_GetKeyFromScancode(scancode, SDL_KMOD_NONE, false);
+	event.key.down      = down;
+
+	SDL_PushEvent(&event);
+}
+
+void push_motion(const float dx, const float dy)
+{
+	int width  = 0;
+	int height = 0;
+	SDL_GetWindowSize(sdl_window, &width, &height);
+
+	cursor_x = std::clamp(cursor_x + dx, 0.0f, static_cast<float>(width - 1));
+	cursor_y = std::clamp(cursor_y + dy, 0.0f, static_cast<float>(height - 1));
+
+	SDL_Event event = {};
+
+	event.type             = SDL_EVENT_MOUSE_MOTION;
+	event.motion.timestamp = SDL_GetTicksNS();
+	event.motion.windowID  = SDL_GetWindowID(sdl_window);
+	event.motion.which     = 1;
+	event.motion.state     = mouse_buttons;
+	event.motion.x         = cursor_x;
+	event.motion.y         = cursor_y;
+	event.motion.xrel      = dx;
+	event.motion.yrel      = dy;
+
+	SDL_PushEvent(&event);
+}
+
+// Moves the pointer to a point in window coordinates
+void push_motion_to(const CGPoint point)
+{
+	push_motion(static_cast<float>(point.x) - cursor_x,
+	            static_cast<float>(point.y) - cursor_y);
+}
+
+void push_button(const Uint8 button, const bool down)
+{
+	if (down) {
+		mouse_buttons |= SDL_BUTTON_MASK(button);
+	} else {
+		mouse_buttons &= ~SDL_BUTTON_MASK(button);
+	}
+
+	SDL_Event event = {};
+
+	event.type             = down ? SDL_EVENT_MOUSE_BUTTON_DOWN
+	                              : SDL_EVENT_MOUSE_BUTTON_UP;
+	event.button.timestamp = SDL_GetTicksNS();
+	event.button.windowID  = SDL_GetWindowID(sdl_window);
+	event.button.which     = 1;
+	event.button.button    = button;
+	event.button.down      = down;
+	event.button.clicks    = 1;
+	event.button.x         = cursor_x;
+	event.button.y         = cursor_y;
+
+	SDL_PushEvent(&event);
+}
+
+void click(const Uint8 button)
+{
+	push_button(button, true);
+
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ClickDurationNs),
+	               dispatch_get_main_queue(),
+	               ^{
+		               push_button(button, false);
+	               });
+}
+
+// Pressing the button the moment the pointer arrives can register the click
+// at the old position, so give the guest a moment to see the move first
+constexpr int64_t MoveSettleNs = 30'000'000;
+
+void click_at(const CGPoint point, const Uint8 button)
+{
+	push_motion_to(point);
+
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, MoveSettleNs),
+	               dispatch_get_main_queue(),
+	               ^{
+		               click(button);
+	               });
+}
+
+NSString* const DirectTouchDefaultsKey = @"DirectTouch";
+
+// The Game keys go down the left side as a column on screens at least this
+// wide for their height (phones in landscape)
+constexpr CGFloat WideScreenAspect = 1.9;
+
+// The BIOS keyboard flags in the BIOS data area; Windows keeps them in sync
+// for DOS sessions as well
+bool is_numlock_on()
+{
+	constexpr uint8_t NumLockActive = 0x20;
+	return (mem_readb(BIOS_KEYBOARD_FLAGS1) & NumLockActive) != 0;
+}
+
+void tap_key(const SDL_Scancode scancode)
+{
+	push_key(scancode, true);
+
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ClickDurationNs),
+	               dispatch_get_main_queue(),
+	               ^{
+		               push_key(scancode, false);
+	               });
+}
+
+bool is_modifier(const SDL_Scancode scancode)
+{
+	switch (scancode) {
+	case SDL_SCANCODE_LSHIFT:
+	case SDL_SCANCODE_RSHIFT:
+	case SDL_SCANCODE_LCTRL:
+	case SDL_SCANCODE_RCTRL:
+	case SDL_SCANCODE_LALT:
+	case SDL_SCANCODE_RALT: return true;
+	default: return false;
+	}
+}
+
+struct KeyDef {
+	NSString* label     = nil;
+	SDL_Scancode scancode = SDL_SCANCODE_UNKNOWN;
+	float width_units   = 1.0f;
+	NSString* caption   = nil; // optional second line saying what the key does
+};
+
+// Each row is 15 units wide; an UNKNOWN scancode is an empty gap
+std::vector<std::vector<KeyDef>> keyboard_layout()
+{
+	return {
+	        {{@"Esc", SDL_SCANCODE_ESCAPE},
+	         {@"F1", SDL_SCANCODE_F1},
+	         {@"F2", SDL_SCANCODE_F2},
+	         {@"F3", SDL_SCANCODE_F3},
+	         {@"F4", SDL_SCANCODE_F4},
+	         {@"F5", SDL_SCANCODE_F5},
+	         {@"F6", SDL_SCANCODE_F6},
+	         {@"F7", SDL_SCANCODE_F7},
+	         {@"F8", SDL_SCANCODE_F8},
+	         {@"F9", SDL_SCANCODE_F9},
+	         {@"F10", SDL_SCANCODE_F10},
+	         {@"F11", SDL_SCANCODE_F11},
+	         {@"F12", SDL_SCANCODE_F12},
+	         {@"PgUp", SDL_SCANCODE_PAGEUP},
+	         {@"PgDn", SDL_SCANCODE_PAGEDOWN}},
+
+	        {{@"`", SDL_SCANCODE_GRAVE},
+	         {@"1", SDL_SCANCODE_1},
+	         {@"2", SDL_SCANCODE_2},
+	         {@"3", SDL_SCANCODE_3},
+	         {@"4", SDL_SCANCODE_4},
+	         {@"5", SDL_SCANCODE_5},
+	         {@"6", SDL_SCANCODE_6},
+	         {@"7", SDL_SCANCODE_7},
+	         {@"8", SDL_SCANCODE_8},
+	         {@"9", SDL_SCANCODE_9},
+	         {@"0", SDL_SCANCODE_0},
+	         {@"-", SDL_SCANCODE_MINUS},
+	         {@"=", SDL_SCANCODE_EQUALS},
+	         {@"Bksp", SDL_SCANCODE_BACKSPACE, 2.0f}},
+
+	        {{@"Tab", SDL_SCANCODE_TAB, 1.5f},
+	         {@"Q", SDL_SCANCODE_Q},
+	         {@"W", SDL_SCANCODE_W},
+	         {@"E", SDL_SCANCODE_E},
+	         {@"R", SDL_SCANCODE_R},
+	         {@"T", SDL_SCANCODE_T},
+	         {@"Y", SDL_SCANCODE_Y},
+	         {@"U", SDL_SCANCODE_U},
+	         {@"I", SDL_SCANCODE_I},
+	         {@"O", SDL_SCANCODE_O},
+	         {@"P", SDL_SCANCODE_P},
+	         {@"[", SDL_SCANCODE_LEFTBRACKET},
+	         {@"]", SDL_SCANCODE_RIGHTBRACKET},
+	         {@"\\", SDL_SCANCODE_BACKSLASH, 1.5f}},
+
+	        {{@"Caps", SDL_SCANCODE_CAPSLOCK, 1.75f},
+	         {@"A", SDL_SCANCODE_A},
+	         {@"S", SDL_SCANCODE_S},
+	         {@"D", SDL_SCANCODE_D},
+	         {@"F", SDL_SCANCODE_F},
+	         {@"G", SDL_SCANCODE_G},
+	         {@"H", SDL_SCANCODE_H},
+	         {@"J", SDL_SCANCODE_J},
+	         {@"K", SDL_SCANCODE_K},
+	         {@"L", SDL_SCANCODE_L},
+	         {@";", SDL_SCANCODE_SEMICOLON},
+	         {@"'", SDL_SCANCODE_APOSTROPHE},
+	         {@"Enter", SDL_SCANCODE_RETURN, 2.25f}},
+
+	        {{@"Shift", SDL_SCANCODE_LSHIFT, 2.0f},
+	         {@"Z", SDL_SCANCODE_Z},
+	         {@"X", SDL_SCANCODE_X},
+	         {@"C", SDL_SCANCODE_C},
+	         {@"V", SDL_SCANCODE_V},
+	         {@"B", SDL_SCANCODE_B},
+	         {@"N", SDL_SCANCODE_N},
+	         {@"M", SDL_SCANCODE_M},
+	         {@",", SDL_SCANCODE_COMMA},
+	         {@".", SDL_SCANCODE_PERIOD},
+	         {@"/", SDL_SCANCODE_SLASH},
+	         {@"Shift", SDL_SCANCODE_RSHIFT},
+	         {@"↑", SDL_SCANCODE_UP},
+	         {@"Del", SDL_SCANCODE_DELETE}},
+
+	        {{@"Ctrl", SDL_SCANCODE_LCTRL, 1.5f},
+	         {@"Alt", SDL_SCANCODE_LALT, 1.5f},
+	         {@"Space", SDL_SCANCODE_SPACE, 7.0f},
+	         {@"Alt", SDL_SCANCODE_RALT},
+	         {@"Ctrl", SDL_SCANCODE_RCTRL},
+	         {@"←", SDL_SCANCODE_LEFT},
+	         {@"↓", SDL_SCANCODE_DOWN},
+	         {@"→", SDL_SCANCODE_RIGHT}},
+	};
+}
+
+// 4 units wide; gaps keep the familiar shape without tall keys
+std::vector<std::vector<KeyDef>> numpad_layout()
+{
+	return {
+	        {{@"Num", SDL_SCANCODE_NUMLOCKCLEAR},
+	         {@"/", SDL_SCANCODE_KP_DIVIDE},
+	         {@"*", SDL_SCANCODE_KP_MULTIPLY},
+	         {@"-", SDL_SCANCODE_KP_MINUS}},
+	        {{@"7", SDL_SCANCODE_KP_7},
+	         {@"8", SDL_SCANCODE_KP_8},
+	         {@"9", SDL_SCANCODE_KP_9},
+	         {@"+", SDL_SCANCODE_KP_PLUS}},
+	        {{@"4", SDL_SCANCODE_KP_4},
+	         {@"5", SDL_SCANCODE_KP_5},
+	         {@"6", SDL_SCANCODE_KP_6},
+	         {nil, SDL_SCANCODE_UNKNOWN}},
+	        {{@"1", SDL_SCANCODE_KP_1},
+	         {@"2", SDL_SCANCODE_KP_2},
+	         {@"3", SDL_SCANCODE_KP_3},
+	         {@"Enter", SDL_SCANCODE_KP_ENTER}},
+	        {{@"0", SDL_SCANCODE_KP_0, 2.0f},
+	         {@".", SDL_SCANCODE_KP_PERIOD},
+	         {nil, SDL_SCANCODE_UNKNOWN}},
+	};
+}
+
+// Game-specific keys for Sid Meier's Colonization. The unit order keys come
+// from the order table in the game's COLTEXT0.DLL.
+std::vector<std::vector<KeyDef>> colonization_layout()
+{
+	return {
+	        {{@"B", SDL_SCANCODE_B, 1.0f, @"Build colony"},
+	         {@"F", SDL_SCANCODE_F, 1.0f, @"Fortify"},
+	         {@"S", SDL_SCANCODE_S, 1.0f, @"Sentry"},
+	         {@"G", SDL_SCANCODE_G, 1.0f, @"Go to"},
+	         {@"P", SDL_SCANCODE_P, 1.0f, @"Clear/plow"},
+	         {@"R", SDL_SCANCODE_R, 1.0f, @"Road"}},
+	        {{@"T", SDL_SCANCODE_T, 1.0f, @"Trade route"},
+	         {@"L", SDL_SCANCODE_L, 1.0f, @"Live in village"},
+	         {@"W", SDL_SCANCODE_W, 1.0f, @"Wait"},
+	         {@"Space", SDL_SCANCODE_SPACE, 1.0f, @"No orders"},
+	         {@"Enter", SDL_SCANCODE_RETURN},
+	         {@"Esc", SDL_SCANCODE_ESCAPE}},
+	};
+}
+
+constexpr float KeyboardUnits     = 15.0f;
+constexpr float NumpadUnits       = 4.0f;
+constexpr float ColonizationUnits = 6.0f;
+
+} // namespace
+
+// A key on the on-screen keyboard
+
+@interface DBKeyButton : UIButton
+@property(nonatomic) SDL_Scancode scancode;
+@property(nonatomic) float widthUnits;
+@property(nonatomic, copy) NSString* label;
+@property(nonatomic, copy) NSString* caption;
+@end
+
+@implementation DBKeyButton
+@end
+
+// An on-screen key panel: the PC keyboard or the number pad. Modifiers are sticky: tap Shift, Ctrl or Alt to
+// latch it, and it applies to the next key and then releases. Every key is
+// its own control and multi-touch is on, so keys can be held together (an
+// arrow key plus Ctrl, for instance).
+
+@interface DBKeyboardView : UIView
+- (void)refreshLockKeys;
+
+// Lay each row out as a column instead (for a tall panel down one side)
+@property(nonatomic) bool vertical;
+
+// A panel the user can drag around. Its keys are sent when the finger
+// lifts rather than when it lands, so a two-finger drag doesn't press
+// anything (held keys don't auto-repeat), and it ignores the safe area,
+// keeping its size wherever it's placed.
+@property(nonatomic) bool movable;
+@end
+
+@implementation DBKeyboardView {
+	std::vector<std::vector<DBKeyButton*>> _rows;
+	float _row_units;
+	std::vector<SDL_Scancode> _latched_modifiers;
+	std::vector<SDL_Scancode> _applied_modifiers;
+}
+
+- (instancetype)initWithLayout:(const std::vector<std::vector<KeyDef>>&)layout
+                      rowUnits:(float)row_units
+{
+	self = [super initWithFrame:CGRectZero];
+	if (!self) {
+		return self;
+	}
+
+	_row_units = row_units;
+
+	self.multipleTouchEnabled = YES;
+	self.layer.cornerRadius   = 8.0;
+	self.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+
+	for (const auto& row_defs : layout) {
+		std::vector<DBKeyButton*> row = {};
+
+		for (const auto& def : row_defs) {
+			auto button = [DBKeyButton buttonWithType:UIButtonTypeCustom];
+
+			button.scancode   = def.scancode;
+			button.widthUnits = def.width_units;
+			button.hidden     = (def.scancode == SDL_SCANCODE_UNKNOWN);
+			button.exclusiveTouch       = NO;
+			button.multipleTouchEnabled = YES;
+			button.layer.cornerRadius   = 6.0;
+			button.backgroundColor = [UIColor colorWithWhite:0.18 alpha:0.85];
+			button.titleLabel.font = [UIFont systemFontOfSize:18.0
+			                                           weight:UIFontWeightMedium];
+			if (def.caption) {
+				// The title is set in -layoutSubviews, where the
+				// caption is sized to fit the key
+				button.label   = def.label;
+				button.caption = def.caption;
+				button.titleLabel.numberOfLines = 0;
+				button.titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+				button.titleLabel.textAlignment = NSTextAlignmentCenter;
+			} else {
+				[button setTitle:def.label forState:UIControlStateNormal];
+			}
+			[button setTitleColor:UIColor.whiteColor
+			             forState:UIControlStateNormal];
+
+			[button addTarget:self
+			              action:@selector(touchDown:)
+			    forControlEvents:UIControlEventTouchDown];
+			[button addTarget:self
+			              action:@selector(touchUp:)
+			    forControlEvents:UIControlEventTouchUpInside];
+			[button addTarget:self
+			              action:@selector(touchAbandoned:)
+			    forControlEvents:UIControlEventTouchUpOutside |
+			                     UIControlEventTouchCancel];
+
+			[self addSubview:button];
+			row.push_back(button);
+		}
+		_rows.push_back(row);
+	}
+	return self;
+}
+
+- (void)layoutSubviews
+{
+	[super layoutSubviews];
+
+	constexpr CGFloat Margin = 6.0;
+	constexpr CGFloat Gap    = 5.0;
+
+	const auto bounds = self.bounds;
+
+	const auto safe = _movable ? UIEdgeInsetsZero : self.safeAreaInsets;
+
+	const CGFloat left  = safe.left + Margin;
+
+	const CGFloat width = bounds.size.width - safe.left - safe.right - 2 * Margin;
+	const CGFloat unit  = width / _row_units;
+
+	const CGFloat top    = Margin;
+	const CGFloat height = bounds.size.height - safe.bottom - 2 * Margin;
+	const CGFloat row_height = height / static_cast<CGFloat>(_rows.size());
+
+	if (_vertical) {
+		[self layoutColumnsLeft:left top:top width:width height:height gap:Gap];
+		[self layoutCaptions];
+		return;
+	}
+
+	CGFloat y = top;
+	for (const auto& row : _rows) {
+		CGFloat x = left;
+		for (DBKeyButton* button : row) {
+			const CGFloat key_width = unit * button.widthUnits;
+			button.frame = CGRectMake(x + Gap / 2,
+			                          y + Gap / 2,
+			                          key_width - Gap,
+			                          row_height - Gap);
+			x += key_width;
+		}
+		y += row_height;
+	}
+
+	[self layoutCaptions];
+}
+
+// Sets the titles of the keys that have a caption: the key's letter, and
+// below it what the key does, in the largest font size at which every
+// caption fits its key (wrapping onto a second line if needed). One size
+// for all of them keeps the panel even.
+- (void)layoutCaptions
+{
+	constexpr CGFloat LabelSize      = 14.0;
+	constexpr CGFloat MaxCaptionSize = 12.0;
+	constexpr CGFloat MinCaptionSize = 7.0;
+	constexpr CGFloat Padding        = 4.0;
+
+	auto label_font = [UIFont systemFontOfSize:LabelSize weight:UIFontWeightMedium];
+
+	std::vector<DBKeyButton*> captioned = {};
+	for (const auto& row : _rows) {
+		for (DBKeyButton* button : row) {
+			if (button.caption && button.bounds.size.width > 0) {
+				captioned.push_back(button);
+			}
+		}
+	}
+	if (captioned.empty()) {
+		return;
+	}
+
+	auto fits = [&](UIFont* font) {
+		NSDictionary* attributes = @{NSFontAttributeName: font};
+
+		for (DBKeyButton* button : captioned) {
+			const CGFloat width  = button.bounds.size.width - 2 * Padding;
+			const CGFloat height = button.bounds.size.height - 2 * Padding -
+			                       label_font.lineHeight;
+
+			// Every word must fit on a line, or it would be broken
+			// mid-word
+			for (NSString* word in [button.caption componentsSeparatedByString:@" "]) {
+				if ([word sizeWithAttributes:attributes].width > width) {
+					return false;
+				}
+			}
+			const auto rect = [button.caption
+			        boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
+			                     options:NSStringDrawingUsesLineFragmentOrigin
+			                  attributes:attributes
+			                     context:nil];
+			if (rect.size.height > height) {
+				return false;
+			}
+		}
+		return true;
+	};
+
+	auto caption_font = [UIFont systemFontOfSize:MinCaptionSize
+	                                      weight:UIFontWeightRegular];
+	for (auto size = MaxCaptionSize; size > MinCaptionSize; size -= 0.5) {
+		auto font = [UIFont systemFontOfSize:size weight:UIFontWeightRegular];
+		if (fits(font)) {
+			caption_font = font;
+			break;
+		}
+	}
+
+	for (DBKeyButton* button : captioned) {
+		auto title = [[NSMutableAttributedString alloc]
+		        initWithString:[button.label stringByAppendingString:@"\n"]
+		            attributes:@{NSFontAttributeName: label_font,
+		                         NSForegroundColorAttributeName: UIColor.whiteColor}];
+		[title appendAttributedString:
+		               [[NSAttributedString alloc]
+		                       initWithString:button.caption
+		                           attributes:@{NSFontAttributeName: caption_font,
+		                                        NSForegroundColorAttributeName:
+		                                                [UIColor colorWithWhite:1.0
+		                                                                  alpha:0.8]}]];
+		[button setAttributedTitle:title forState:UIControlStateNormal];
+	}
+}
+
+// Each row becomes a column; keys are all one unit tall
+- (void)layoutColumnsLeft:(CGFloat)left
+                      top:(CGFloat)top
+                    width:(CGFloat)width
+                   height:(CGFloat)height
+                      gap:(CGFloat)gap
+{
+	size_t keys_per_column = 0;
+	for (const auto& row : _rows) {
+		keys_per_column = std::max(keys_per_column, row.size());
+	}
+	if (keys_per_column == 0) {
+		return;
+	}
+
+	const CGFloat column_width = width / static_cast<CGFloat>(_rows.size());
+	const CGFloat key_height = height / static_cast<CGFloat>(keys_per_column);
+
+	CGFloat x = left;
+	for (const auto& row : _rows) {
+		CGFloat y = top;
+		for (DBKeyButton* button : row) {
+			button.frame = CGRectMake(x + gap / 2,
+			                          y + gap / 2,
+			                          column_width - gap,
+			                          key_height - gap);
+			y += key_height;
+		}
+		x += column_width;
+	}
+}
+
+- (void)setVertical:(bool)vertical
+{
+	if (_vertical != vertical) {
+		_vertical = vertical;
+		[self setNeedsLayout];
+	}
+}
+
+- (void)touchDown:(DBKeyButton*)button
+{
+	if (_movable) {
+		button.backgroundColor = [UIColor colorWithWhite:0.45 alpha:0.9];
+	} else {
+		[self keyDown:button];
+	}
+}
+
+- (void)touchUp:(DBKeyButton*)button
+{
+	if (!_movable) {
+		[self keyUp:button];
+		return;
+	}
+
+	// Hold the key long enough for programs that poll the keyboard
+	[self keyDown:button];
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ClickDurationNs),
+	               dispatch_get_main_queue(),
+	               ^{
+		               [self keyUp:button];
+	               });
+}
+
+- (void)touchAbandoned:(DBKeyButton*)button
+{
+	if (_movable) {
+		button.backgroundColor = [UIColor colorWithWhite:0.18 alpha:0.85];
+	} else {
+		[self keyUp:button];
+	}
+}
+
+- (bool)isLatched:(SDL_Scancode)scancode
+{
+	return std::find(_latched_modifiers.begin(), _latched_modifiers.end(), scancode) !=
+	       _latched_modifiers.end();
+}
+
+- (void)refreshLockKeys
+{
+	const auto numlock_on = is_numlock_on();
+
+	for (const auto& row : _rows) {
+		for (DBKeyButton* button : row) {
+			if (button.scancode == SDL_SCANCODE_NUMLOCKCLEAR) {
+				button.backgroundColor =
+				        numlock_on ? [UIColor colorWithRed:0.2 green:0.45 blue:0.9 alpha:0.9]
+				                   : [UIColor colorWithWhite:0.18 alpha:0.85];
+			}
+		}
+	}
+}
+
+- (void)refreshModifierColours
+{
+	for (const auto& row : _rows) {
+		for (DBKeyButton* button : row) {
+			if (is_modifier(button.scancode)) {
+				button.backgroundColor =
+				        [self isLatched:button.scancode]
+				                ? [UIColor colorWithRed:0.2 green:0.45 blue:0.9 alpha:0.9]
+				                : [UIColor colorWithWhite:0.18 alpha:0.85];
+			}
+		}
+	}
+}
+
+- (void)keyDown:(DBKeyButton*)button
+{
+	const auto scancode = button.scancode;
+
+	if (is_modifier(scancode)) {
+		if ([self isLatched:scancode]) {
+			std::erase(_latched_modifiers, scancode);
+		} else {
+			_latched_modifiers.push_back(scancode);
+		}
+		[self refreshModifierColours];
+		return;
+	}
+
+	button.backgroundColor = [UIColor colorWithWhite:0.45 alpha:0.9];
+
+	for (const auto modifier : _latched_modifiers) {
+		push_key(modifier, true);
+		_applied_modifiers.push_back(modifier);
+	}
+	_latched_modifiers.clear();
+
+	push_key(scancode, true);
+}
+
+- (void)keyUp:(DBKeyButton*)button
+{
+	const auto scancode = button.scancode;
+
+	if (is_modifier(scancode)) {
+		return;
+	}
+
+	button.backgroundColor = [UIColor colorWithWhite:0.18 alpha:0.85];
+
+	// Lock keys show their state rather than a plain released colour
+	if (scancode == SDL_SCANCODE_NUMLOCKCLEAR) {
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200'000'000),
+		               dispatch_get_main_queue(),
+		               ^{
+			               [self refreshLockKeys];
+		               });
+	}
+
+	push_key(scancode, false);
+
+	for (const auto modifier : _applied_modifiers) {
+		push_key(modifier, false);
+	}
+	_applied_modifiers.clear();
+
+	[self refreshModifierColours];
+}
+
+@end
+
+// Covers the whole SDL view. Touches outside the key panels drive the mouse
+// in one of two modes, switched with the pointer toggle:
+//
+// Direct touch (the default), for programs with absolute pointing, such as
+// Windows 3.1 with the VBADOS mouse driver:
+//
+//   - tap to left-click where the finger is, tap with two fingers to
+//     right-click there
+//   - drag to drag with the left button held
+//
+// Trackpad, like a laptop's, for programs that only take relative movement:
+//
+//   - drag with one finger to move the pointer
+//   - tap to left-click, tap with two fingers to right-click
+//   - press and hold, then drag, to hold the left button down (dragging)
+
+@interface DBTouchOverlay : UIView <UIGestureRecognizerDelegate>
+@end
+
+@implementation DBTouchOverlay {
+	DBKeyboardView* _keyboard;
+	DBKeyboardView* _numpad;
+	DBKeyboardView* _gameKeys;
+	UIButton* _keyboardToggle;
+	UIButton* _numpadToggle;
+	UIButton* _gameKeysToggle;
+	UIButton* _pointerToggle;
+	UILongPressGestureRecognizer* _hold;
+	CGPoint _last_drag_point;
+	bool _direct_touch;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame
+{
+	self = [super initWithFrame:frame];
+	if (!self) {
+		return self;
+	}
+
+	self.multipleTouchEnabled = YES;
+	self.backgroundColor      = UIColor.clearColor;
+
+	auto pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
+	                                                   action:@selector(onPan:)];
+	pan.maximumNumberOfTouches = 1;
+	pan.delegate               = self;
+	[self addGestureRecognizer:pan];
+
+	auto tap = [[UITapGestureRecognizer alloc] initWithTarget:self
+	                                                   action:@selector(onTap:)];
+	tap.delegate = self;
+	[self addGestureRecognizer:tap];
+
+	auto two_finger_tap = [[UITapGestureRecognizer alloc]
+	        initWithTarget:self
+	                action:@selector(onTwoFingerTap:)];
+	two_finger_tap.numberOfTouchesRequired = 2;
+	two_finger_tap.delegate                = self;
+	[self addGestureRecognizer:two_finger_tap];
+
+	auto hold = [[UILongPressGestureRecognizer alloc]
+	        initWithTarget:self
+	                action:@selector(onHold:)];
+	hold.minimumPressDuration = 0.35;
+	hold.delegate             = self;
+	[self addGestureRecognizer:hold];
+	_hold = hold;
+
+	_keyboard = [[DBKeyboardView alloc] initWithLayout:keyboard_layout()
+	                                          rowUnits:KeyboardUnits];
+	_keyboard.hidden = YES;
+	[self addSubview:_keyboard];
+
+	_numpad = [[DBKeyboardView alloc] initWithLayout:numpad_layout()
+	                                        rowUnits:NumpadUnits];
+	_numpad.hidden  = YES;
+	_numpad.movable = true;
+	[self addSubview:_numpad];
+	[self makeMovable:_numpad];
+
+	_gameKeys = [[DBKeyboardView alloc] initWithLayout:colonization_layout()
+	                                          rowUnits:ColonizationUnits];
+	_gameKeys.hidden  = YES;
+	_gameKeys.movable = true;
+	[self addSubview:_gameKeys];
+	[self makeMovable:_gameKeys];
+
+	// Keep the Num key's light in step with the emulated NumLock state,
+	// which the guest can also change
+	[NSTimer scheduledTimerWithTimeInterval:0.5
+	                                repeats:YES
+	                                  block:^(NSTimer*) {
+		                                  if (!self->_numpad.hidden) {
+			                                  [self->_numpad refreshLockKeys];
+		                                  }
+	                                  }];
+
+	_keyboardToggle = [self makeToggle:nil action:@selector(toggleKeyboard)];
+	_numpadToggle   = [self makeToggle:@"123" action:@selector(toggleNumpad)];
+	_gameKeysToggle = [self makeToggle:@"Game" action:@selector(toggleGameKeys)];
+	_pointerToggle  = [self makeToggle:nil action:@selector(togglePointerMode)];
+
+	auto defaults = NSUserDefaults.standardUserDefaults;
+	_direct_touch = ([defaults objectForKey:DirectTouchDefaultsKey] == nil) ||
+	                [defaults boolForKey:DirectTouchDefaultsKey];
+	[self refreshPointerToggle];
+
+	auto symbol_config = [UIImageSymbolConfiguration
+	        configurationWithPointSize:22.0
+	                            weight:UIImageSymbolWeightSemibold];
+	[_keyboardToggle setImage:[UIImage systemImageNamed:@"keyboard"
+	                                    withConfiguration:symbol_config]
+	                 forState:UIControlStateNormal];
+
+	return self;
+}
+
+- (UIButton*)makeToggle:(NSString*)title action:(SEL)action
+{
+	auto toggle = [UIButton buttonWithType:UIButtonTypeCustom];
+	[toggle setTitle:title forState:UIControlStateNormal];
+	toggle.titleLabel.font = [UIFont systemFontOfSize:22.0 weight:UIFontWeightSemibold];
+	toggle.tintColor       = UIColor.whiteColor;
+	toggle.backgroundColor = [UIColor colorWithWhite:0.3 alpha:0.5];
+	toggle.layer.cornerRadius = 10.0;
+	[toggle addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+	[self addSubview:toggle];
+	return toggle;
+}
+
+- (void)layoutSubviews
+{
+	[super layoutSubviews];
+
+	const auto bounds = self.bounds;
+	const auto safe   = self.safeAreaInsets;
+
+	// Keep the keys a usable size on phones, where the screen is short
+	const CGFloat keyboard_height = std::clamp(bounds.size.height * 0.32,
+	                                           std::min(220.0, bounds.size.height * 0.55),
+	                                           bounds.size.height * 0.55);
+
+	constexpr CGFloat ToggleWidth  = 66.0;
+	constexpr CGFloat ToggleHeight = 44.0;
+	constexpr CGFloat ToggleGap    = 10.0;
+
+	// The number pad sits in the bottom-right corner, above the keyboard
+	// when both are showing. On a phone there's no room above it, so the
+	// keyboard narrows and the number pad sits beside it instead.
+	const CGFloat numpad_width  = std::min(bounds.size.width * 0.18, 240.0);
+	const CGFloat numpad_height = numpad_width * 1.15;
+
+	const CGFloat keyboard_top     = bounds.size.height - keyboard_height;
+	const CGFloat toggles_bottom   = safe.top + 12 + ToggleHeight;
+	const bool numpad_beside_keyboard = !_keyboard.hidden && !_numpad.hidden &&
+	                                    (keyboard_top - 8 - numpad_height <
+	                                     toggles_bottom + 8);
+
+	const CGFloat keyboard_width = numpad_beside_keyboard
+	                                     ? bounds.size.width - safe.right -
+	                                               numpad_width - 12
+	                                     : bounds.size.width;
+
+	_keyboard.frame = CGRectMake(0, keyboard_top, keyboard_width, keyboard_height);
+
+	const CGFloat numpad_bottom = (_keyboard.hidden || numpad_beside_keyboard)
+	                                    ? bounds.size.height - safe.bottom - 12
+	                                    : keyboard_top - 8;
+	const CGFloat numpad_shown_height =
+	        numpad_beside_keyboard
+	                ? std::min(numpad_height, numpad_bottom - keyboard_top - 6)
+	                : numpad_height;
+
+	_numpad.frame = CGRectMake(bounds.size.width - safe.right - numpad_width - 12,
+	                           numpad_bottom - numpad_shown_height,
+	                           numpad_width,
+	                           numpad_shown_height);
+
+	const CGFloat panels_bottom = _keyboard.hidden ? numpad_bottom
+	                                               : keyboard_top - 8;
+
+	// The game keys sit in the bottom-left corner, likewise above the
+	// keyboard. On a wide screen with the keyboard closed they make a column
+	// down the left side instead.
+	const bool wide_screen = bounds.size.width >=
+	                         bounds.size.height * WideScreenAspect;
+	_gameKeys.vertical = wide_screen && _keyboard.hidden;
+
+	if (_gameKeys.vertical) {
+		const CGFloat column_width = 68.0;
+		const CGFloat game_keys_width = 2 * column_width + 12;
+		const CGFloat game_keys_height = std::min(
+		        6 * 50.0 + 12, panels_bottom - toggles_bottom - 8);
+
+		_gameKeys.frame = CGRectMake(safe.left + 12,
+		                             panels_bottom - game_keys_height,
+		                             game_keys_width,
+		                             game_keys_height);
+	} else {
+		const CGFloat game_keys_width = std::min(bounds.size.width * 0.42, 540.0);
+		const CGFloat game_keys_height = std::min(game_keys_width * 0.26, 140.0);
+
+		_gameKeys.frame = CGRectMake(safe.left + 12,
+		                             panels_bottom - game_keys_height,
+		                             game_keys_width,
+		                             game_keys_height);
+	}
+
+	// Panels the user has dragged elsewhere go back where they were left,
+	// except while the keyboard is open, which needs the default spots
+	if (_keyboard.hidden) {
+		[self restorePosition:_numpad];
+		[self restorePosition:_gameKeys];
+	}
+
+	const CGFloat toggle_right = bounds.size.width - safe.right - 12;
+
+	_keyboardToggle.frame = CGRectMake(toggle_right - ToggleWidth,
+	                                   safe.top + 12,
+	                                   ToggleWidth,
+	                                   ToggleHeight);
+	_numpadToggle.frame = CGRectMake(toggle_right - 2 * ToggleWidth - ToggleGap,
+	                                 safe.top + 12,
+	                                 ToggleWidth,
+	                                 ToggleHeight);
+	_gameKeysToggle.frame = CGRectMake(toggle_right - 3 * ToggleWidth - 2 * ToggleGap,
+	                                   safe.top + 12,
+	                                   ToggleWidth,
+	                                   ToggleHeight);
+	_pointerToggle.frame = CGRectMake(toggle_right - 4 * ToggleWidth - 3 * ToggleGap,
+	                                  safe.top + 12,
+	                                  ToggleWidth,
+	                                  ToggleHeight);
+}
+
+// Panels can be dragged around with two fingers
+- (void)makeMovable:(UIView*)panel
+{
+	auto drag = [[UIPanGestureRecognizer alloc] initWithTarget:self
+	                                                    action:@selector(onPanelDrag:)];
+	drag.minimumNumberOfTouches = 2;
+	drag.maximumNumberOfTouches = 2;
+	[panel addGestureRecognizer:drag];
+}
+
+// Where a panel was left is saved separately for each of its layouts, as
+// a fraction of the screen so it survives a change of screen size
+- (NSString*)positionDefaultsKey:(UIView*)panel
+{
+	if (panel == _numpad) {
+		return @"PanelPosition.Numpad";
+	}
+	return _gameKeys.vertical ? @"PanelPosition.GameKeys.Vertical"
+	                          : @"PanelPosition.GameKeys.Horizontal";
+}
+
+// Keeps the whole panel on screen
+- (CGPoint)clampedCenter:(CGPoint)center forPanel:(UIView*)panel
+{
+	const auto bounds = self.bounds;
+	const auto size   = panel.bounds.size;
+
+	center.x = std::clamp(center.x, size.width / 2, bounds.size.width - size.width / 2);
+	center.y = std::clamp(center.y, size.height / 2, bounds.size.height - size.height / 2);
+	return center;
+}
+
+- (void)restorePosition:(UIView*)panel
+{
+	NSArray* saved = [NSUserDefaults.standardUserDefaults
+	        arrayForKey:[self positionDefaultsKey:panel]];
+	if (saved.count != 2) {
+		return;
+	}
+
+	const auto bounds = self.bounds;
+	const CGPoint center = CGPointMake([saved[0] doubleValue] * bounds.size.width,
+	                                   [saved[1] doubleValue] * bounds.size.height);
+	panel.center = [self clampedCenter:center forPanel:panel];
+}
+
+- (void)onPanelDrag:(UIPanGestureRecognizer*)drag
+{
+	UIView* panel = drag.view;
+
+	const auto translation = [drag translationInView:self];
+	[drag setTranslation:CGPointZero inView:self];
+
+	panel.center = [self clampedCenter:CGPointMake(panel.center.x + translation.x,
+	                                               panel.center.y + translation.y)
+	                          forPanel:panel];
+
+	// Only remember positions chosen with the keyboard closed, the layout
+	// they're restored in
+	if (drag.state == UIGestureRecognizerStateEnded && _keyboard.hidden) {
+		const auto bounds = self.bounds;
+		[NSUserDefaults.standardUserDefaults
+		        setObject:@[@(panel.center.x / bounds.size.width),
+		                    @(panel.center.y / bounds.size.height)]
+		           forKey:[self positionDefaultsKey:panel]];
+	}
+}
+
+- (void)togglePointerMode
+{
+	_direct_touch = !_direct_touch;
+	[NSUserDefaults.standardUserDefaults setBool:_direct_touch
+	                                      forKey:DirectTouchDefaultsKey];
+	[self refreshPointerToggle];
+}
+
+// The toggle shows the current mode: a tapping hand for direct touch, a
+// trackpad for trackpad mode
+- (void)refreshPointerToggle
+{
+	// In direct touch a plain drag already drags, so press-and-hold is off
+	_hold.enabled = !_direct_touch;
+
+	auto symbol_config = [UIImageSymbolConfiguration
+	        configurationWithPointSize:22.0
+	                            weight:UIImageSymbolWeightSemibold];
+	auto symbol = _direct_touch ? @"hand.tap" : @"rectangle.and.hand.point.up.left";
+	[_pointerToggle setImage:[UIImage systemImageNamed:symbol
+	                                   withConfiguration:symbol_config]
+	                forState:UIControlStateNormal];
+}
+
+- (void)toggleKeyboard
+{
+	_keyboard.hidden = !_keyboard.hidden;
+	[self setNeedsLayout];
+}
+
+- (void)toggleGameKeys
+{
+	_gameKeys.hidden = !_gameKeys.hidden;
+	[self setNeedsLayout];
+}
+
+- (void)toggleNumpad
+{
+	_numpad.hidden = !_numpad.hidden;
+
+	// The pad is for typing numbers, so switch NumLock on when it opens
+	if (!_numpad.hidden && !is_numlock_on()) {
+		tap_key(SDL_SCANCODE_NUMLOCKCLEAR);
+	}
+	[_numpad refreshLockKeys];
+	[self setNeedsLayout];
+}
+
+// The trackpad gestures ignore touches that land on the key panels or their
+// toggle buttons
+- (BOOL)gestureRecognizer:(UIGestureRecognizer*)recognizer
+       shouldReceiveTouch:(UITouch*)touch
+{
+	return !([touch.view isDescendantOfView:_keyboard] ||
+	         [touch.view isDescendantOfView:_numpad] ||
+	         [touch.view isDescendantOfView:_gameKeys] ||
+	         [touch.view isDescendantOfView:_keyboardToggle] ||
+	         [touch.view isDescendantOfView:_numpadToggle] ||
+	         [touch.view isDescendantOfView:_gameKeysToggle] ||
+	         [touch.view isDescendantOfView:_pointerToggle]);
+}
+
+- (void)onPan:(UIPanGestureRecognizer*)pan
+{
+	if (_direct_touch) {
+		[self onDirectDrag:pan];
+		return;
+	}
+
+	const auto translation = [pan translationInView:self];
+	[pan setTranslation:CGPointZero inView:self];
+
+	push_motion(static_cast<float>(translation.x) * TrackpadSpeed,
+	            static_cast<float>(translation.y) * TrackpadSpeed);
+}
+
+// The gesture recognizers above see every touch first. Don't pass touches
+// on up the responder chain: SDL's view would turn them into mouse events of
+// its own at the finger's position, which in seamless mode jump the pointer
+// and add stray presses and drags.
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+}
+
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+}
+
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+}
+
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+}
+
+// Direct touch: press where the finger first landed, follow it, and
+// release where it lifts
+- (void)onDirectDrag:(UIPanGestureRecognizer*)pan
+{
+	const auto point = [pan locationInView:self];
+
+	switch (pan.state) {
+	case UIGestureRecognizerStateBegan: {
+		// The pan only begins once the finger has moved a little, so
+		// start the drag from where it first touched
+		const auto translation = [pan translationInView:self];
+		push_motion_to(CGPointMake(point.x - translation.x,
+		                           point.y - translation.y));
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, MoveSettleNs),
+		               dispatch_get_main_queue(),
+		               ^{
+			               push_button(SDL_BUTTON_LEFT, true);
+			               push_motion_to(point);
+		               });
+	} break;
+
+	case UIGestureRecognizerStateChanged: push_motion_to(point); break;
+
+	case UIGestureRecognizerStateEnded:
+	case UIGestureRecognizerStateCancelled:
+	case UIGestureRecognizerStateFailed:
+		// After the delayed press above, so a quick flick still
+		// releases the button
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, MoveSettleNs),
+		               dispatch_get_main_queue(),
+		               ^{
+			               push_motion_to(point);
+			               push_button(SDL_BUTTON_LEFT, false);
+		               });
+		break;
+
+	default: break;
+	}
+}
+
+- (void)onTap:(UITapGestureRecognizer*)tap
+{
+	if (_direct_touch) {
+		click_at([tap locationInView:self], SDL_BUTTON_LEFT);
+	} else {
+		click(SDL_BUTTON_LEFT);
+	}
+}
+
+- (void)onTwoFingerTap:(UITapGestureRecognizer*)tap
+{
+	if (_direct_touch) {
+		click_at([tap locationInView:self], SDL_BUTTON_RIGHT);
+	} else {
+		click(SDL_BUTTON_RIGHT);
+	}
+}
+
+- (void)onHold:(UILongPressGestureRecognizer*)hold
+{
+	const auto point = [hold locationInView:self];
+
+	switch (hold.state) {
+	case UIGestureRecognizerStateBegan:
+		_last_drag_point = point;
+		push_button(SDL_BUTTON_LEFT, true);
+		break;
+
+	case UIGestureRecognizerStateChanged:
+		push_motion(static_cast<float>(point.x - _last_drag_point.x) * TrackpadSpeed,
+		            static_cast<float>(point.y - _last_drag_point.y) * TrackpadSpeed);
+		_last_drag_point = point;
+		break;
+
+	case UIGestureRecognizerStateEnded:
+	case UIGestureRecognizerStateCancelled:
+	case UIGestureRecognizerStateFailed:
+		push_button(SDL_BUTTON_LEFT, false);
+		break;
+
+	default: break;
+	}
+}
+
+@end
+
+void IOS_InstallTouchOverlay(SDL_Window* window)
+{
+	static DBTouchOverlay* overlay = nil;
+
+	sdl_window = window;
+
+	const auto properties = SDL_GetWindowProperties(window);
+	auto ui_window = (__bridge UIWindow*)SDL_GetPointerProperty(
+	        properties, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
+
+	UIView* root_view = ui_window.rootViewController.view;
+	if (!root_view) {
+		return;
+	}
+
+	if (!overlay || overlay.superview != root_view) {
+		[overlay removeFromSuperview];
+
+		overlay = [[DBTouchOverlay alloc] initWithFrame:root_view.bounds];
+		overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+		                           UIViewAutoresizingFlexibleHeight;
+		[root_view addSubview:overlay];
+
+		cursor_x = static_cast<float>(root_view.bounds.size.width / 2);
+		cursor_y = static_cast<float>(root_view.bounds.size.height / 2);
+	}
+
+	// The renderer may add its Metal view after us; stay on top of it
+	[root_view bringSubviewToFront:overlay];
+}

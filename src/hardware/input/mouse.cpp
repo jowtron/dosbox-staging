@@ -166,9 +166,16 @@ static void update_state() // updates whole 'state' structure, except cursor vis
 	const bool is_config_on_click = (mouse_config.capture == MouseCapture::OnClick);
 	const bool is_config_no_mouse = (mouse_config.capture == MouseCapture::NoMouse);
 
+#if defined(DOSBOX_PLATFORM_IOS)
+	// The app is always full screen, and there's no host pointer to capture:
+	// the touch overlay drives the mouse. Treat it like a window, so seamless
+	// (absolute) pointer integration works.
+	const bool is_window_or_multi_display = true;
+#else
 	// Only consider multi-display mode if enabled in the configuration!
 	const bool is_window_or_multi_display = !state.is_fullscreen ||
 		(state.is_multi_display && mouse_config.multi_display_aware);
+#endif
 
 	// If running for the first time, capture the mouse if this was configured
 	static bool first_time = true;

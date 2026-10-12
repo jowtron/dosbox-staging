@@ -27,6 +27,9 @@
 #include "dosbox.h"
 #include "gui/mapper.h"
 #include "gui/private/window_geometry.h"
+#if defined(DOSBOX_PLATFORM_IOS)
+#include "gui/ios/touch_overlay.h"
+#endif
 #include "gui/render/opengl_renderer.h"
 #include "gui/render/sdl_renderer.h"
 #include "gui/titlebar.h"
@@ -321,6 +324,10 @@ static void configure_renderer()
 	} else if (output == "texturenb") {
 		sdl.render_backend_type = RenderBackendType::Sdl;
 		sdl.texture_filter_mode = TextureFilterMode::NearestNeighbour;
+
+	} else if (output == "texturesharp") {
+		sdl.render_backend_type = RenderBackendType::Sdl;
+		sdl.texture_filter_mode = TextureFilterMode::Sharp;
 
 #if C_OPENGL
 	} else if (output == "opengl") {
@@ -1120,6 +1127,12 @@ static void set_keyboard_capture()
 
 void GFX_SetMouseCapture(const bool requested_capture)
 {
+#if defined(DOSBOX_PLATFORM_IOS)
+	// SDL only has a relative mouse mode on iOS while a hardware mouse is
+	// connected. Without one the touch overlay produces relative motion
+	// itself, so failing to enter relative mode is expected and harmless.
+	SDL_SetWindowRelativeMouseMode(sdl.window, requested_capture);
+#else
 	if (!SDL_SetWindowRelativeMouseMode(sdl.window, requested_capture)) {
 		SDL_ShowCursor();
 
@@ -1127,6 +1140,7 @@ void GFX_SetMouseCapture(const bool requested_capture)
 		       requested_capture ? "putting the mouse into"
 		                         : "taking the mouse out of");
 	}
+#endif
 
 	sdl.is_mouse_captured = requested_capture;
 
@@ -2046,6 +2060,9 @@ void GFX_InitAndStartGui()
 	assert(sdl.window);
 
 	log_window_size();
+#if defined(DOSBOX_PLATFORM_IOS)
+	IOS_InstallTouchOverlay(sdl.window);
+#endif
 
 #ifdef MACOSX
 	// The renderers create the windows with SDL_CreateWindowWithProperties()
@@ -2738,6 +2755,8 @@ static void init_sdl_config_settings(SectionProp& section)
 
 #if C_OPENGL
 	const std::string default_output = "opengl";
+#elif defined(DOSBOX_PLATFORM_IOS)
+	const std::string default_output = "texturesharp";
 #else
 	const std::string default_output = "texture";
 #endif
@@ -2761,6 +2780,9 @@ static void init_sdl_config_settings(SectionProp& section)
 	pstring->SetOptionHelp("texturenb",
 	                       "  texturenb:  SDL's texture backend with nearest-neighbour interpolation\n"
 	                       "              (no bilinear).");
+	pstring->SetOptionHelp("texturesharp",
+	                       "  texturesharp:  SDL's texture backend with sharp pixel-art scaling;\n"
+	                       "                 crisp pixels that stay even at non-integer scales.");
 #if C_OPENGL
 	pstring->SetDeprecatedWithAlternateValue("surface", "opengl");
 	pstring->SetDeprecatedWithAlternateValue("openglpp", "opengl");
@@ -2776,6 +2798,7 @@ static void init_sdl_config_settings(SectionProp& section)
 #endif
 	        "texture",
 	        "texturenb",
+	        "texturesharp",
 	});
 	pstring->SetEnabledOptions({
 #if C_OPENGL
@@ -2786,6 +2809,7 @@ static void init_sdl_config_settings(SectionProp& section)
 #endif
 	        "texture",
 	        "texturenb",
+	        "texturesharp",
 	});
 
 	pstring = section.AddString("texture_renderer", OnlyAtStart, "auto");

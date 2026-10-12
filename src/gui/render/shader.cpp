@@ -5,8 +5,6 @@
 
 #include <array>
 
-#if C_OPENGL
-
 // Build a OpenGL shader program.
 //
 // Input GLSL source must contain both vertex and fragment stages inside their
@@ -226,5 +224,3 @@ void Shader::SetUniform3f(const std::string& name, const float val1,
 		glUniform3f(location, val1, val2, val3);
 	}
 }
-
-#endif

@@ -24,8 +24,14 @@
 // Defined if compiling for Linux (non-Android)
 #cmakedefine LINUX
 
-// Defined if compiling for macOS
+// Defined if compiling for macOS (also defined for iOS)
 #cmakedefine MACOSX
+
+// Defined if compiling for iOS
+#cmakedefine DOSBOX_PLATFORM_IOS
+
+// Enables the CoreAudio MIDI synth backend (macOS only, not iOS)
+#cmakedefine01 C_COREAUDIO
 
 // Defined if compiling for Windows (any option)
 #ifndef WIN32
