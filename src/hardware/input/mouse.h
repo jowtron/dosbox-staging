@@ -20,6 +20,7 @@
 
 void MOUSE_AddConfigSection(const ConfigPtr &);
 void MOUSE_Init();
+void MOUSE_Destroy();
 
 // ***************************************************************************
 // Data types

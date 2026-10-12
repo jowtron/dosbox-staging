@@ -3083,13 +3083,18 @@ void GFX_AddConfigSection()
 	register_sdl_text_messages();
 }
 
+void GFX_DestroyWindow()
+{
+	sdl.renderer = {};
+	sdl.window   = nullptr;
+}
+
 void GFX_Quit()
 {
 #if !C_DEBUGGER
 	// Renderer must be destoryed before SDL_Quit() is called.
 	// Otherwise we can get segfaults and sadness.
-	sdl.renderer = {};
-	sdl.window   = nullptr;
+	GFX_DestroyWindow();
 
 	SDL_Quit();
 #endif

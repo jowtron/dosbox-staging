@@ -33,6 +33,7 @@
 #include "debugger/debugger.h"
 #include "dos/dos.h"
 #include "dos/dos_locale.h"
+#include "dos/dos_windows.h"
 #include "dos/programs.h"
 #include "dosbox_pause_fsm.h"
 #include "fpu/fpu.h"
@@ -1020,6 +1021,27 @@ void DOSBOX_Restart()
 	DOSBOX_Restart(control->startup_params);
 }
 
+static std::optional<std::vector<std::string>> restart_parameters = {};
+
+bool DOSBOX_IsInProcessRestartEnabled()
+{
+#if defined(DOSBOX_PLATFORM_IOS)
+	return true;
+#else
+	// For testing the in-process restart on desktop builds (see
+	// get_restart_test() in main.cpp)
+	return std::getenv("DOSBOX_IN_PROCESS_RESTART") != nullptr ||
+	       std::getenv("DOSBOX_RESTART_TEST") != nullptr;
+#endif
+}
+
+std::optional<std::vector<std::string>> DOSBOX_TakeRestartParameters()
+{
+	auto parameters = std::move(restart_parameters);
+	restart_parameters.reset();
+	return parameters;
+}
+
 void DOSBOX_Restart(std::vector<std::string>& parameters)
 {
 	control->ApplyQueuedValuesToCli(parameters);
@@ -1027,6 +1049,12 @@ void DOSBOX_Restart(std::vector<std::string>& parameters)
 	// Remove any existing --waitpid parameters.
 	// This can happen with multiple restarts.
 	remove_waitpid(parameters);
+
+	if (DOSBOX_IsInProcessRestartEnabled()) {
+		restart_parameters = parameters;
+		GFX_RequestExit(true);
+		return;
+	}
 
 #ifdef WIN32
 	parameters.emplace_back("--waitpid");
@@ -1246,6 +1274,10 @@ void DOSBOX_Init()
 {
 	auto section = get_section("dosbox");
 	assert(section);
+
+	// A shutdown request from a previous run (in-process restart) has
+	// already been served
+	is_shutdown_requested = false;
 
 	dosbox_realinit(*section);
 
@@ -1700,17 +1732,26 @@ void DOSBOX_InitModules()
 
 void DOSBOX_DestroyModules()
 {
+	// Forget the guest's state, as the BOOT command does, so an in-process
+	// restart doesn't think Windows is still running, for instance
+	WINDOWS_NotifyBooting();
+	VIRTUALBOX_NotifyBooting();
+	VMWARE_NotifyBooting();
+	MOUSE_NotifyBooting();
+
 	WEBSERVER_Destroy();
 	VMWARE_Destroy();
 	VIRTUALBOX_Destroy();
 	ETHERNET_Destroy();
 	IPX_Destroy();
 
+	AUTOEXEC_Destroy();
 	DOS_Destroy();
 	SERIAL_Destroy();
 	DISKNOISE_Destroy();
 
 	JOYSTICK_Destroy();
+	MOUSE_Destroy();
 	BIOS_Destroy();
 
 	REELMAGIC_Destroy();
@@ -1734,6 +1775,7 @@ void DOSBOX_DestroyModules()
 	VGA_Destroy();
 	DMA_Destroy();
 	CPU_Destroy();
+	CPU_ResetForRestart();
 
 #if C_DEBUGGER
 	LOG_Destroy();

@@ -2845,6 +2845,18 @@ bool MOUSEDOS_StartDriver(const bool force_low_memory)
 
 void MOUSEDOS_Init()
 {
+	// Forget the previous run's driver when the emulator restarts
+	// in-process: its memory is gone, and so is the guest's Windows
+	state_segment.reset();
+	is_win386_mode       = false;
+	is_win386_foreground = false;
+	delay_running        = false;
+	delay_finished       = true;
+	rate_is_set          = false;
+	rate_hz              = 0;
+	min_rate_hz          = 0;
+	pending              = decltype(pending){};
+
 	prepare_driver_info();
 
 	// Allocate callbacks

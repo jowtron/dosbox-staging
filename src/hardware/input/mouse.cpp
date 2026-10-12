@@ -1147,6 +1147,15 @@ void MOUSE_StartupIfReady()
 	MOUSEDOS_Init();
 }
 
+// Lets the mouse start again when the emulator restarts in-process
+void MOUSE_Destroy()
+{
+	mouse_shared.started      = false;
+	mouse_shared.ready_init   = false;
+	mouse_shared.ready_config = false;
+	mouse_shared.ready_gfx    = false;
+}
+
 void MOUSE_NotifyReadyGFX()
 {
 	mouse_shared.ready_gfx = true;

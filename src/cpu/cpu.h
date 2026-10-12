@@ -83,6 +83,7 @@ void CPU_AddConfigSection(const ConfigPtr& conf);
 
 void CPU_Init();
 void CPU_Destroy();
+void CPU_ResetForRestart();
 
 uint8_t CPU_GetLastInterrupt();
 

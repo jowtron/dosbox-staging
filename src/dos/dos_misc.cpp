@@ -4,6 +4,7 @@
 
 #include "dos.h"
 
+#include <algorithm>
 #include <list>
 
 #include "cpu/callback.h"
@@ -18,6 +19,11 @@ static callback_number_t call_int2a = 0;
 static std::list<MultiplexHandler*> Multiplex;
 
 void DOS_AddMultiplexHandler(MultiplexHandler* handler) {
+	// Modules add their handler again when the emulator restarts
+	// in-process; it must still be called only once per interrupt
+	if (std::find(Multiplex.begin(), Multiplex.end(), handler) != Multiplex.end()) {
+		return;
+	}
 	Multiplex.push_front(handler);
 }
 

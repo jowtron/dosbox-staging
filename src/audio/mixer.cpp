@@ -3277,6 +3277,8 @@ void MIXER_Init()
 	// One second of audio
 	mixer.capture_queue.Resize(mixer.sample_rate_hz * 2);
 
+	// The flag is still set if the mixer ran before (in-process restart)
+	mixer.thread_should_quit = false;
 	mixer.thread = std::thread(mixer_thread_loop);
 	set_thread_name(mixer.thread, "dosbox:mixer");
 

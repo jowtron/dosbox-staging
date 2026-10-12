@@ -19,5 +19,6 @@ void AUTOEXEC_RefreshFile();
 void AUTOEXEC_SetVariable(const std::string& name, const std::string& value);
 
 void AUTOEXEC_Init();
+void AUTOEXEC_Destroy();
 
 #endif

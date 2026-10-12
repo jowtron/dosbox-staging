@@ -23,6 +23,10 @@ void GFX_RequestExit(const bool pressed);
 
 void GFX_Quit();
 
+// Destroys the renderer and window but keeps SDL running, for an in-process
+// restart
+void GFX_DestroyWindow();
+
 void GFX_LosingFocus();
 
 void GFX_CenterMouse();

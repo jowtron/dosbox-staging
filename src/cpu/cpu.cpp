@@ -3165,6 +3165,8 @@ class Cpu final {
 private:
 	static bool initialised;
 
+	friend void CPU_ResetForRestart();
+
 public:
 	Cpu(Section* sec)
 	{
@@ -3746,6 +3748,22 @@ void CPU_Destroy()
 #endif
 
 	cpu_instance.reset();
+}
+
+// Changing a CPU setting destroys and re-creates the CPU module but keeps the
+// registers. When the emulator restarts in-process, the next CPU_Init() must
+// reset them too, or the new run carries on in the previous one's protected
+// mode, for instance.
+void CPU_ResetForRestart()
+{
+	// Including the state the reset in the constructor leaves alone: the
+	// descriptor tables and privilege level, and the task state segment
+	cpu_regs = {};
+	cpu      = {};
+	Segs     = {};
+	cpu_tss  = {};
+
+	Cpu::initialised = false;
 }
 
 static void notify_cpu_setting_updated([[maybe_unused]] SectionProp& section,

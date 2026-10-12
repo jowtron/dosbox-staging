@@ -880,3 +880,18 @@ void AUTOEXEC_Init()
 	autoexec_module = std::make_unique<AutoExecModule>(section);
 	AUTOEXEC_RefreshFile();
 }
+
+// Clears the generated AUTOEXEC.BAT, so an in-process restart starts from the
+// new configuration only. Not done in AUTOEXEC_Init(): other modules set
+// their variables (BLASTER, for instance) before it runs.
+void AUTOEXEC_Destroy()
+{
+	autoexec_module.reset();
+
+	autoexec_lines.clear();
+	autoexec_variables.clear();
+	autoexec_has_echo_off = false;
+	autoexec_bat_utf8.reset();
+	autoexec_bat_bin.clear();
+	vfile_code_page.reset();
+}

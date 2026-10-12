@@ -719,7 +719,10 @@ public:
 
 		const auto num_pages = num_megabytes * PagesPerMegabyte;
 
-		// Size the actual memory pages
+		// Size the actual memory pages, starting from cleared memory
+		// (the emulator can restart in-process, and resizing to the same
+		// size would keep the previous run's contents)
+		memory.pages.clear();
 		memory.pages.resize(num_pages);
 
 		// The MemBase is address of the first page's first byte

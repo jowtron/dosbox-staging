@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 
 // Project name, lower-case and without spaces
 #define DOSBOX_PROJECT_NAME "dosbox-staging"
@@ -105,6 +106,13 @@ void DOSBOX_SetTicksScheduled(const int64_t ticks_scheduled);
 
 void DOSBOX_Restart();
 void DOSBOX_Restart(std::vector<std::string>& parameters);
+
+// Restarting in-process: instead of starting a new copy of the program,
+// DOSBOX_Restart() stores the new command line and shuts the emulator down,
+// and main() starts it again. Always on iOS, where an app can't launch
+// itself.
+bool DOSBOX_IsInProcessRestartEnabled();
+std::optional<std::vector<std::string>> DOSBOX_TakeRestartParameters();
 
 enum class MachineType {
 	// Value not set yet

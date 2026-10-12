@@ -598,6 +598,13 @@ void TIMER_DelTickHandler(TIMER_TickHandler handler) {
 }
 
 void TIMER_AddTickHandler(TIMER_TickHandler handler) {
+	// Modules without a destroy function add their handler again when the
+	// emulator restarts in-process; it must still run only once per tick
+	for (auto ticker = firstticker; ticker; ticker = ticker->next) {
+		if (ticker->handler == handler) {
+			return;
+		}
+	}
 	auto newticker=new TickerBlock;
 	newticker->next=firstticker;
 	newticker->handler=handler;

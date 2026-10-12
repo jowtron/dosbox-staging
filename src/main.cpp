@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <signal.h>
 #include <string>
 #include <thread>
@@ -21,15 +22,18 @@
 
 #include "config/config.h"
 #include "config/setup.h"
+#include "cpu/cpu.h"
 #include "debugger/debugger.h"
 #include "dos/dos_locale.h"
 #include "gui/mapper.h"
 #include "gui/render/render.h"
+#include "hardware/memory.h"
 #include "misc/cross.h"
 #include "shell/command_line.h"
 #include "shell/shell.h"
 #include "utils/checks.h"
 #include "utils/env_utils.h"
+#include "utils/string_utils.h"
 
 CHECK_NARROWING();
 
@@ -591,6 +595,38 @@ static void wait_for_pid(const int wait_pid)
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+#if !defined(DOSBOX_PLATFORM_IOS)
+// Test hook for the in-process restart: DOSBOX_RESTART_TEST lists config
+// files separated by ';', which run one after another in this process, each
+// for DOSBOX_RESTART_TEST_SECS seconds (20 by default). Implies
+// DOSBOX_IN_PROCESS_RESTART.
+struct RestartTest {
+	std::vector<std::string> conf_files = {};
+	size_t next_run                     = 0;
+	uint32_t run_ms                     = 20'000;
+};
+
+static std::optional<RestartTest> get_restart_test()
+{
+	const auto confs = std::getenv("DOSBOX_RESTART_TEST");
+	if (!confs) {
+		return {};
+	}
+	RestartTest test = {};
+	test.conf_files  = split(confs, ";");
+	if (const auto secs = std::getenv("DOSBOX_RESTART_TEST_SECS")) {
+		test.run_ms = static_cast<uint32_t>(std::atoi(secs)) * 1000;
+	}
+	return test;
+}
+
+static Uint32 SDLCALL end_restart_test_run(void*, SDL_TimerID, Uint32)
+{
+	DOSBOX_RequestShutdown();
+	return 0;
+}
+#endif
+
 int main(int argc, char* argv[])
 {
 	// Ensure we perform SDL cleanup and restore console settings at exit
@@ -603,153 +639,235 @@ int main(int argc, char* argv[])
 	std_fs::current_path(resolve_home("~/Documents"), ec);
 #endif
 
-	CommandLine command_line(argc, argv);
-	control = std::make_unique<Config>(&command_line);
+	// The command line of the current run; an in-process restart replaces
+	// it (see DOSBOX_Restart())
+	std::vector<std::string> args(argv, argv + argc);
 
-	const auto arguments = &control->arguments;
+#if !defined(DOSBOX_PLATFORM_IOS)
+	auto restart_test = get_restart_test();
+#endif
 
-	if (arguments->wait_pid) {
-		wait_for_pid(*arguments->wait_pid);
-	}
+	std::unique_ptr<CommandLine> command_line = {};
+
+	int return_code   = 0;
+	bool is_first_run = true;
+
+	while (true) {
+#if !defined(DOSBOX_PLATFORM_IOS)
+		if (restart_test && restart_test->next_run < restart_test->conf_files.size()) {
+			args = {argv[0],
+			        "--noprimaryconf",
+			        "--nolocalconf",
+			        "--conf",
+			        restart_test->conf_files[restart_test->next_run++]};
+		}
+#endif
+		std::vector<const char*> run_argv = {};
+		for (const auto& arg : args) {
+			run_argv.push_back(arg.c_str());
+		}
+		command_line = std::make_unique<CommandLine>(static_cast<int>(run_argv.size()),
+		                                             run_argv.data());
+		control = std::make_unique<Config>(command_line.get());
+
+		const auto arguments = &control->arguments;
+
+		if (is_first_run) {
+			if (arguments->wait_pid) {
+				wait_for_pid(*arguments->wait_pid);
+			}
 
 #ifdef WIN32
-	switch_console_to_utf8();
-	set_console_icon();
+			switch_console_to_utf8();
+			set_console_icon();
 #endif
 
-	// Set up logging after command line was parsed and trivial arguments
-	// have been handled.
-	init_logger(*arguments, argc, argv);
+			// Set up logging after command line was parsed and
+			// trivial arguments have been handled.
+			init_logger(*arguments, argc, argv);
 
 #if defined(DOSBOX_PLATFORM_IOS)
-	// There's no terminal on a device, so also keep the log in Documents
-	// (reachable from the Files app). The previous run's log is kept as
-	// 'dosbox-log-prev.txt', so a log survives the relaunch after a hang.
-	{
-		std::error_code log_ec;
-		std_fs::rename("dosbox-log.txt", "dosbox-log-prev.txt", log_ec);
-		loguru::add_file("dosbox-log.txt", loguru::Truncate, loguru::Verbosity_INFO);
-	}
+			// There's no terminal on a device, so also keep the log in
+			// Documents (reachable from the Files app). The previous
+			// run's log is kept as 'dosbox-log-prev.txt', so a log
+			// survives the relaunch after a hang.
+			{
+				std::error_code log_ec;
+				std_fs::rename("dosbox-log.txt", "dosbox-log-prev.txt", log_ec);
+				loguru::add_file("dosbox-log.txt",
+				                 loguru::Truncate,
+				                 loguru::Verbosity_INFO);
+			}
 #endif
 
-	const auto version_string = DOSBOX_GetDetailedVersion();
+			const auto version_string = DOSBOX_GetDetailedVersion();
 
-	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, DOSBOX_PROJECT_NAME);			
-	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_VERSION_STRING, version_string);			
-	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_IDENTIFIER_STRING, DOSBOX_APP_ID);			
-	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_COPYRIGHT_STRING, DOSBOX_COPYRIGHT);			
-	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_URL_STRING, DOSBOX_WEBSITE);
+			SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, DOSBOX_PROJECT_NAME);
+			SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_VERSION_STRING, version_string);
+			SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_IDENTIFIER_STRING, DOSBOX_APP_ID);
+			SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_COPYRIGHT_STRING, DOSBOX_COPYRIGHT);
+			SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_URL_STRING, DOSBOX_WEBSITE);
 
-	LOG_MSG("%s version %s", DOSBOX_PROJECT_NAME, version_string);
-	LOG_MSG("---");
+			LOG_MSG("%s version %s", DOSBOX_PROJECT_NAME, version_string);
+			LOG_MSG("---");
 
-	LOG_MSG("Loguru version %d.%d.%d initialised",
-	        LOGURU_VERSION_MAJOR,
-	        LOGURU_VERSION_MINOR,
-	        LOGURU_VERSION_PATCH);
+			LOG_MSG("Loguru version %d.%d.%d initialised",
+			        LOGURU_VERSION_MAJOR,
+			        LOGURU_VERSION_MINOR,
+			        LOGURU_VERSION_PATCH);
+		} else {
+			LOG_MSG("---");
+			LOG_MSG("Restarting the emulator in-process");
+		}
+		is_first_run = false;
 
-	int return_code = 0;
-
-	try {
-		if (!arguments->working_dir.empty()) {
-			std::error_code ec;
-			std_fs::current_path(arguments->working_dir, ec);
-			if (ec) {
-				LOG_ERR("Cannot set working directory to '%s'",
-				        arguments->working_dir.c_str());
+		try {
+			if (!arguments->working_dir.empty()) {
+				std::error_code ec;
+				std_fs::current_path(arguments->working_dir, ec);
+				if (ec) {
+					LOG_ERR("Cannot set working directory to '%s'",
+					        arguments->working_dir.c_str());
+				}
 			}
-		}
 
-		// Create or determine the location of the config directory
-		// (e.g., in portable mode, the config directory is the
-		// executable dir).
-		//
-		// TODO Consider forcing portable mode in secure mode (this
-		// could be accomplished by passing a flag to init_config_dir);.
-		//
-		init_config_dir();
+			// Create or determine the location of the config
+			// directory (e.g., in portable mode, the config
+			// directory is the executable dir).
+			//
+			// TODO Consider forcing portable mode in secure mode
+			// (this could be accomplished by passing a flag to
+			// init_config_dir);.
+			//
+			init_config_dir();
 
-		// Register essential DOS messages needed by some command line
-		// switches and during startup or reboot.
-		register_command_line_help_message();
+			// Register essential DOS messages needed by some command
+			// line switches and during startup or reboot.
+			register_command_line_help_message();
 
-		// We need to call this before initialising the modules to to
-		// support the '--list-countries' and '--list-layouts' command
-		// line options.
-		DOS_Locale_AddMessages();
+			// We need to call this before initialising the modules
+			// to to support the '--list-countries' and
+			// '--list-layouts' command line options.
+			DOS_Locale_AddMessages();
 
-		// We need to call this before initialising the modules to to
-		// support the '--list-shaders' command line option.
-		RENDER_AddMessages();
+			// We need to call this before initialising the modules
+			// to to support the '--list-shaders' command line
+			// option.
+			RENDER_AddMessages();
 
-		GFX_AddConfigSection();
+			GFX_AddConfigSection();
 
-		// Register the config sections and messages of all the other
-		// modules.
-		DOSBOX_InitModuleConfigsAndMessages();
+			// Register the config sections and messages of all the
+			// other modules.
+			DOSBOX_InitModuleConfigsAndMessages();
 
-		maybe_write_primary_config(*arguments);
+			maybe_write_primary_config(*arguments);
 
-		// After DOSBOX_InitModuleConfigsAndMessages() all the config
-		// sections have been registered, so we're ready to parse the
-		// config files.
-		control->ParseConfigFiles(get_config_dir());
+			// After DOSBOX_InitModuleConfigsAndMessages() all the
+			// config sections have been registered, so we're ready
+			// to parse the config files.
+			control->ParseConfigFiles(get_config_dir());
 
-		// Handle command line options that don't start the emulator but
-		// only perform some actions and print the results to the console.
-		assert(argv && argv[0]);
-		const auto program_name = argv[0];
+			// Handle command line options that don't start the
+			// emulator but only perform some actions and print the
+			// results to the console.
+			assert(argv && argv[0]);
+			const auto program_name = argv[0];
 
-		if (const auto return_code = maybe_handle_command_line_output_only_actions(
-		            *arguments, program_name);
-		    return_code) {
+			if (const auto return_code = maybe_handle_command_line_output_only_actions(
+			            *arguments, program_name);
+			    return_code) {
 
-			// Exit to the command line
-			return *return_code;
-		}
+				// Exit to the command line
+				return *return_code;
+			}
 
 #if defined(WIN32)
-		SetConsoleCtrlHandler((PHANDLER_ROUTINE)console_event_handler, TRUE);
+			SetConsoleCtrlHandler((PHANDLER_ROUTINE)console_event_handler,
+			                      TRUE);
 #endif
 
-		// Handle configuration settings passed with `--set` commands
-		// from the CLI.
-		handle_cli_set_commands(arguments->set);
+			// Handle configuration settings passed with `--set`
+			// commands from the CLI.
+			handle_cli_set_commands(arguments->set);
 
-		maybe_create_resource_directories();
+			maybe_create_resource_directories();
 
-		GFX_InitSdl();
-		DOSBOX_InitModules();
-		GFX_InitAndStartGui();
+			GFX_InitSdl();
+			DOSBOX_InitModules();
+			GFX_InitAndStartGui();
 
-		// All subsystems' hotkeys need to be registered at this point
-		// to ensure their hotkeys appear in the graphical mapper.
-		MAPPER_BindKeys(get_sdl_section());
+			// All subsystems' hotkeys need to be registered at this
+			// point to ensure their hotkeys appear in the graphical
+			// mapper.
+			MAPPER_BindKeys(get_sdl_section());
 
-		if (arguments->startmapper) {
-			MAPPER_DisplayUI();
+			if (arguments->startmapper) {
+				MAPPER_DisplayUI();
+			}
+
+#if !defined(DOSBOX_PLATFORM_IOS)
+			SDL_TimerID test_timer = 0;
+			if (restart_test) {
+				test_timer = SDL_AddTimer(restart_test->run_ms,
+				                          end_restart_test_run,
+				                          nullptr);
+			}
+#endif
+
+			// Start emulation
+			SHELL_InitAndRun();
+
+#if !defined(DOSBOX_PLATFORM_IOS)
+			if (test_timer) {
+				SDL_RemoveTimer(test_timer);
+			}
+			if (restart_test && !cpu.pmode) {
+				// The text screen at the end of the run, for
+				// reading messages without a window
+				for (int row = 0; row < 25; ++row) {
+					std::string line = {};
+					for (int col = 0; col < 80; ++col) {
+						line += static_cast<char>(mem_readb(
+						        0xb8000 + (row * 80 + col) * 2));
+					}
+					LOG_MSG("SCREEN: %s", line.c_str());
+				}
+			}
+#endif
+
+			DOSBOX_DestroyModules();
+			GFX_Destroy();
+
+		} catch (char* error) {
+			// TODO Maybe show popup dialog with the error in addition
+			// to logging it (use the tiny osdialog lib).
+			LOG_ERR("Unexpected error: %s", error);
+			return_code = 1;
+
+		} catch (const std::exception& e) {
+			// TODO Maybe show popup dialog with the error in addition
+			// to logging it (use the tiny osdialog lib).
+			LOG_ERR("Standard library exception: %s", e.what());
+			return_code = 1;
+
+		} catch (...) {
+			return_code = 1;
 		}
 
-		// Start emulation
-		SHELL_InitAndRun();
+		auto restart_args = DOSBOX_TakeRestartParameters();
+#if !defined(DOSBOX_PLATFORM_IOS)
+		if (restart_test && restart_test->next_run < restart_test->conf_files.size()) {
+			restart_args = args;
+		}
+#endif
+		if (return_code != 0 || !restart_args) {
+			break;
+		}
+		args = std::move(*restart_args);
 
-		DOSBOX_DestroyModules();
-		GFX_Destroy();
-
-	} catch (char* error) {
-		// TODO Maybe show popup dialog with the error in addition to
-		// logging it (use the tiny osdialog lib).
-		LOG_ERR("Unexpected error: %s", error);
-		return_code = 1;
-
-	} catch (const std::exception& e) {
-		// TODO Maybe show popup dialog with the error in addition to
-		// logging it (use the tiny osdialog lib).
-		LOG_ERR("Standard library exception: %s", e.what());
-		return_code = 1;
-
-	} catch (...) {
-		return_code = 1;
+		// Keep SDL running; the next run creates a new window
+		GFX_DestroyWindow();
 	}
 
 	// We already do this at exit, but do clean up earlier in case of normal
