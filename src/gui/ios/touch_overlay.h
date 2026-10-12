@@ -13,4 +13,8 @@
 // Safe to call again if the SDL window is recreated.
 void IOS_InstallTouchOverlay(SDL_Window* window);
 
+// Removes the overlay before the SDL window is destroyed (between runs of
+// the emulator)
+void IOS_RemoveTouchOverlay();
+
 #endif // DOSBOX_IOS_TOUCH_OVERLAY_H

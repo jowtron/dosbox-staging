@@ -3085,6 +3085,9 @@ void GFX_AddConfigSection()
 
 void GFX_DestroyWindow()
 {
+#if defined(DOSBOX_PLATFORM_IOS)
+	IOS_RemoveTouchOverlay();
+#endif
 	sdl.renderer = {};
 	sdl.window   = nullptr;
 }

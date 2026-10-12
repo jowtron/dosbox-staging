@@ -3,6 +3,8 @@
 
 #include "gui/ios/touch_overlay.h"
 
+#include "dosbox.h"
+
 #include "hardware/memory.h"
 #include "ints/bios.h"
 
@@ -715,6 +717,7 @@ constexpr float ColonizationUnits = 6.0f;
 //   - press and hold, then drag, to hold the left button down (dragging)
 
 @interface DBTouchOverlay : UIView <UIGestureRecognizerDelegate>
+- (void)shutDown;
 @end
 
 @implementation DBTouchOverlay {
@@ -725,6 +728,8 @@ constexpr float ColonizationUnits = 6.0f;
 	UIButton* _numpadToggle;
 	UIButton* _gameKeysToggle;
 	UIButton* _pointerToggle;
+	UIButton* _libraryButton;
+	NSTimer* _lock_keys_timer;
 	UILongPressGestureRecognizer* _hold;
 	CGPoint _last_drag_point;
 	bool _direct_touch;
@@ -787,18 +792,23 @@ constexpr float ColonizationUnits = 6.0f;
 
 	// Keep the Num key's light in step with the emulated NumLock state,
 	// which the guest can also change
-	[NSTimer scheduledTimerWithTimeInterval:0.5
-	                                repeats:YES
-	                                  block:^(NSTimer*) {
-		                                  if (!self->_numpad.hidden) {
-			                                  [self->_numpad refreshLockKeys];
-		                                  }
-	                                  }];
+	__weak DBTouchOverlay* weak_self = self;
+	_lock_keys_timer = [NSTimer
+	        scheduledTimerWithTimeInterval:0.5
+	                               repeats:YES
+	                                 block:^(NSTimer*) {
+		                                 auto strong_self = weak_self;
+		                                 if (strong_self &&
+		                                     !strong_self->_numpad.hidden) {
+			                                 [strong_self->_numpad refreshLockKeys];
+		                                 }
+	                                 }];
 
 	_keyboardToggle = [self makeToggle:nil action:@selector(toggleKeyboard)];
 	_numpadToggle   = [self makeToggle:@"123" action:@selector(toggleNumpad)];
 	_gameKeysToggle = [self makeToggle:@"Game" action:@selector(toggleGameKeys)];
 	_pointerToggle  = [self makeToggle:nil action:@selector(togglePointerMode)];
+	_libraryButton  = [self makeToggle:nil action:@selector(confirmQuitToLibrary)];
 
 	auto defaults = NSUserDefaults.standardUserDefaults;
 	_direct_touch = ([defaults objectForKey:DirectTouchDefaultsKey] == nil) ||
@@ -811,6 +821,9 @@ constexpr float ColonizationUnits = 6.0f;
 	[_keyboardToggle setImage:[UIImage systemImageNamed:@"keyboard"
 	                                    withConfiguration:symbol_config]
 	                 forState:UIControlStateNormal];
+	[_libraryButton setImage:[UIImage systemImageNamed:@"square.grid.2x2"
+	                                   withConfiguration:symbol_config]
+	                forState:UIControlStateNormal];
 
 	return self;
 }
@@ -931,6 +944,41 @@ constexpr float ColonizationUnits = 6.0f;
 	                                  safe.top + 12,
 	                                  ToggleWidth,
 	                                  ToggleHeight);
+
+	// Back to the library, away from the other toggles in the top-left
+	// corner
+	_libraryButton.frame = CGRectMake(safe.left + 12,
+	                                  safe.top + 12,
+	                                  ToggleWidth,
+	                                  ToggleHeight);
+}
+
+- (void)confirmQuitToLibrary
+{
+	auto alert = [UIAlertController
+	        alertControllerWithTitle:@"Quit to the library?"
+	                         message:@"Anything not saved in the game will be lost."
+	                  preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+	                                          style:UIAlertActionStyleCancel
+	                                        handler:nil]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Quit"
+	                                          style:UIAlertActionStyleDestructive
+	                                        handler:^(UIAlertAction*) {
+		                                        DOSBOX_RequestShutdown();
+	                                        }]];
+	[self.window.rootViewController presentViewController:alert
+	                                             animated:YES
+	                                           completion:nil];
+}
+
+// Stops the timer, which reads the emulated BIOS data area, before the
+// emulator shuts down
+- (void)shutDown
+{
+	[_lock_keys_timer invalidate];
+	_lock_keys_timer = nil;
+	[self removeFromSuperview];
 }
 
 // Panels can be dragged around with two fingers
@@ -1060,7 +1108,8 @@ constexpr float ColonizationUnits = 6.0f;
 	         [touch.view isDescendantOfView:_keyboardToggle] ||
 	         [touch.view isDescendantOfView:_numpadToggle] ||
 	         [touch.view isDescendantOfView:_gameKeysToggle] ||
-	         [touch.view isDescendantOfView:_pointerToggle]);
+	         [touch.view isDescendantOfView:_pointerToggle] ||
+	         [touch.view isDescendantOfView:_libraryButton]);
 }
 
 - (void)onPan:(UIPanGestureRecognizer*)pan
@@ -1183,10 +1232,16 @@ constexpr float ColonizationUnits = 6.0f;
 
 @end
 
+static DBTouchOverlay* overlay = nil;
+
+void IOS_RemoveTouchOverlay()
+{
+	[overlay shutDown];
+	overlay = nil;
+}
+
 void IOS_InstallTouchOverlay(SDL_Window* window)
 {
-	static DBTouchOverlay* overlay = nil;
-
 	sdl_window = window;
 
 	const auto properties = SDL_GetWindowProperties(window);

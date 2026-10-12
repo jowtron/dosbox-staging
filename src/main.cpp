@@ -4,6 +4,9 @@
 #include "dosbox.h"
 
 #include "gui/common.h"
+#if defined(DOSBOX_PLATFORM_IOS)
+#include "gui/ios/library.h"
+#endif
 
 #include <chrono>
 #include <cstdlib>
@@ -595,7 +598,17 @@ static void wait_for_pid(const int wait_pid)
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
-#if !defined(DOSBOX_PLATFORM_IOS)
+#if defined(DOSBOX_PLATFORM_IOS)
+// Test hook for driving the app without taps (e.g., in the iOS Simulator,
+// with 'SIMCTL_CHILD_' prefixed variables): with DOSPAD_AUTOQUIT_SECS set,
+// each game returns to the library after that many seconds. See also
+// DOSPAD_AUTOPICK in library.mm.
+static Uint32 SDLCALL autoquit_game(void*, SDL_TimerID, Uint32)
+{
+	DOSBOX_RequestShutdown();
+	return 0;
+}
+#else
 // Test hook for the in-process restart: DOSBOX_RESTART_TEST lists config
 // files separated by ';', which run one after another in this process, each
 // for DOSBOX_RESTART_TEST_SECS seconds (20 by default). Implies
@@ -643,7 +656,10 @@ int main(int argc, char* argv[])
 	// it (see DOSBOX_Restart())
 	std::vector<std::string> args(argv, argv + argc);
 
-#if !defined(DOSBOX_PLATFORM_IOS)
+#if defined(DOSBOX_PLATFORM_IOS)
+	// The app starts in the game library
+	args = IOS_ChooseGame(argv[0]);
+#else
 	auto restart_test = get_restart_test();
 #endif
 
@@ -806,7 +822,14 @@ int main(int argc, char* argv[])
 				MAPPER_DisplayUI();
 			}
 
-#if !defined(DOSBOX_PLATFORM_IOS)
+#if defined(DOSBOX_PLATFORM_IOS)
+			SDL_TimerID test_timer = 0;
+			if (const auto secs = std::getenv("DOSPAD_AUTOQUIT_SECS")) {
+				test_timer = SDL_AddTimer(static_cast<Uint32>(std::atoi(secs)) * 1000,
+				                          autoquit_game,
+				                          nullptr);
+			}
+#else
 			SDL_TimerID test_timer = 0;
 			if (restart_test) {
 				test_timer = SDL_AddTimer(restart_test->run_ms,
@@ -818,10 +841,10 @@ int main(int argc, char* argv[])
 			// Start emulation
 			SHELL_InitAndRun();
 
-#if !defined(DOSBOX_PLATFORM_IOS)
 			if (test_timer) {
 				SDL_RemoveTimer(test_timer);
 			}
+#if !defined(DOSBOX_PLATFORM_IOS)
 			if (restart_test && !cpu.pmode) {
 				// The text screen at the end of the run, for
 				// reading messages without a window
@@ -861,6 +884,16 @@ int main(int argc, char* argv[])
 			restart_args = args;
 		}
 #endif
+#if defined(DOSBOX_PLATFORM_IOS)
+		// An iOS app never quits; a game that ends (or fails) goes back
+		// to the library. Keep SDL running; the next run creates a new
+		// window.
+		GFX_DestroyWindow();
+		return_code = 0;
+
+		args = restart_args ? std::move(*restart_args)
+		                    : IOS_ChooseGame(argv[0]);
+#else
 		if (return_code != 0 || !restart_args) {
 			break;
 		}
@@ -868,6 +901,7 @@ int main(int argc, char* argv[])
 
 		// Keep SDL running; the next run creates a new window
 		GFX_DestroyWindow();
+#endif
 	}
 
 	// We already do this at exit, but do clean up earlier in case of normal
