@@ -320,8 +320,11 @@ char *DriveManager::GetDrivePosition(int drive)
 
 void DriveManager::Init()
 {
-	// setup drive_infos structure
+	// setup drive_infos structure (also forgetting the previous run's
+	// images when the emulator restarts in-process; mounting appends to
+	// the list and starts from its first entry)
 	for(int i = 0; i < DOS_DRIVES; i++) {
+		drive_infos.at(i).disks.clear();
 		drive_infos.at(i).current_disk = 0;
 	}
 
