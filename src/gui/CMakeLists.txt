@@ -26,12 +26,13 @@ target_sources(dosboxcommon PRIVATE
 endif()
 
 if (DOSBOX_PLATFORM_IOS)
-  target_sources(dosboxcommon PRIVATE ios/touch_overlay.mm ios/library.mm)
+  target_sources(dosboxcommon PRIVATE ios/touch_overlay.mm ios/library.mm ios/game_import.mm)
   # TARGET_DIRECTORY: the target is defined in another directory, where
   # source properties set here would otherwise not apply
-  set_source_files_properties(ios/touch_overlay.mm ios/library.mm
+  set_source_files_properties(ios/touch_overlay.mm ios/library.mm ios/game_import.mm
     TARGET_DIRECTORY dosboxcommon PROPERTIES COMPILE_FLAGS "-fobjc-arc")
-  target_link_libraries(dosboxcommon PRIVATE "-framework UIKit")
+  target_link_libraries(dosboxcommon PRIVATE "-framework UIKit"
+    "-framework UniformTypeIdentifiers")
 endif()
 
 if (OPT_DEBUGGER)
