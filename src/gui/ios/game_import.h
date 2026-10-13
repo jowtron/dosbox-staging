@@ -6,14 +6,24 @@
 
 #import <Foundation/Foundation.h>
 
-// Adding games to the library. Paths are relative to the working directory,
-// the app's Documents folder.
+// The games in the library, and adding to it. Paths are relative to the
+// working directory, the app's Documents folder.
+//
+// A game is either a folder in 'Games' holding the game's files and its
+// 'dosbox.conf', or a single config file in 'Games' (for games whose files
+// live elsewhere, such as those installed in a shared Windows drive). Either
+// way, the game's config is an overlay on the shared 'dosbox.conf'.
 
-// Folder of the game configs shown in the library
 extern NSString* const GamesFolder;
 
-// Copies a game's folder into the 'Imported' folder. Returns the copy's
-// path, or nil on failure.
+// The config file of each game in the library, keyed by the game's name
+NSDictionary<NSString*, NSString*>* FindGames();
+
+// True if the game is a folder holding its files, not just a config file
+bool IsGameFolder(NSString* conf_path);
+
+// Copies a game's folder into the library as a new game folder. Returns the
+// copy's path, or nil on failure.
 NSString* ImportGameFolder(NSURL* source, NSError** error);
 
 // DOS programs in a game's folder (and one level of subfolders) that could
@@ -24,11 +34,10 @@ NSArray<NSString*>* FindGamePrograms(NSString* folder);
 // nil if there's none.
 NSString* FindGameCdImage(NSString* folder);
 
-// Writes the library config that starts a game: mounts its folder as C:
-// (and its CD image as D:), runs the program, and returns to the library
-// when it quits. Returns the config's name, which is the game's name in the
-// library, or nil on failure.
-NSString* WriteGameConf(NSString* name, NSString* folder, NSString* program,
-                        NSString* cd_image, NSError** error);
+// Writes the game folder's config: mounts the folder as C: (and its CD
+// image as D:), runs the program, and returns to the library when it quits.
+// A config the folder already had is kept as 'dosbox-original.conf'.
+bool WriteGameConf(NSString* folder, NSString* program, NSString* cd_image,
+                   NSError** error);
 
 #endif // DOSBOX_IOS_GAME_IMPORT_H

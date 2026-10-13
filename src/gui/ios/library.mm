@@ -15,20 +15,21 @@
 
 namespace {
 
-NSString* const ConfExtension = @"conf";
+// Settings the app needs whatever a game's config says, applied after all
+// the config files
+const std::vector<std::string> RequiredSettings = {
+        // The app is always full screen
+        "sdl fullscreen=true",
+        // iOS always waits for the display's refresh; presenting at the DOS
+        // rate stalls the emulator on 60 Hz screens
+        "sdl presentation_mode=host-rate",
+        // The touch overlay's direct touch mode needs absolute pointing
+        "mouse mouse_capture=seamless",
+};
 
-NSArray<NSString*>* find_game_confs()
+NSArray<NSString*>* sorted_names(NSDictionary<NSString*, NSString*>* games)
 {
-	auto files = [NSFileManager.defaultManager contentsOfDirectoryAtPath:GamesFolder
-	                                                               error:nil];
-	auto confs = [NSMutableArray<NSString*> array];
-	for (NSString* file in files) {
-		if ([file.pathExtension.lowercaseString isEqualToString:ConfExtension]) {
-			[confs addObject:file];
-		}
-	}
-	[confs sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
-	return confs;
+	return [games.allKeys sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
 }
 
 // Test hooks for driving the library without taps (e.g., in the iOS
@@ -77,12 +78,12 @@ void maybe_import_for_testing()
 	const auto program  = std::getenv("DOSPAD_IMPORT_PROGRAM")
 	                            ? @(std::getenv("DOSPAD_IMPORT_PROGRAM"))
 	                            : programs.firstObject;
-	const auto name = WriteGameConf(folder.lastPathComponent,
-	                                folder,
-	                                program,
-	                                FindGameCdImage(folder),
-	                                &error);
-	NSLog(@"DOSPAD_IMPORT: added '%@' starting '%@' (found: %@)", name, program, programs);
+	const auto written = WriteGameConf(folder, program, FindGameCdImage(folder), &error);
+	NSLog(@"DOSPAD_IMPORT: added '%@' (%d) starting '%@' (found: %@)",
+	      folder,
+	      written,
+	      program,
+	      programs);
 }
 
 void show_error(UIViewController* presenter, NSString* title, NSError* error)
@@ -147,36 +148,39 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 
 	add(@"Add Game (+)\n", heading);
 	add(@"Tap + and choose the folder a DOS game is in: in iCloud Drive, On My "
-	    @"iPhone, or on a USB drive. The folder is copied into the app, and "
-	    @"you choose which program starts the game. If the folder has a CD "
-	    @"image (.cue or .iso), it becomes the CD drive, D:.\n\n"
+	    @"iPhone, or on a USB drive. The folder is copied into the Games "
+	    @"folder, and you choose which program starts the game. If the folder "
+	    @"has a CD image (.cue or .iso), it becomes the CD drive, D:.\n\n"
 	    @"The game's folder is drive C:. Quitting the game brings you back "
 	    @"to this list.\n\n",
 	    body);
 
-	add(@"Doing it by hand\n", heading);
-	add(@"Each game in the list is a small DOSBox config file in the Games "
-	    @"folder (Files › On My iPhone › DOSBox Staging › Games), named after "
-	    @"the game. Its [autoexec] section runs when the game starts, for "
-	    @"example:\n\n",
+	add(@"How games are set up\n", heading);
+	add(@"Each game has its own folder in the Games folder (Files › On My "
+	    @"iPhone › DOSBox Staging › Games), holding the game's files and its "
+	    @"settings in a file called dosbox.conf. Its [autoexec] section runs "
+	    @"when the game starts, for example:\n\n",
 	    body);
-	add(@"[autoexec]\nmount c \"Imported/DUKE3D\"\nc:\nDUKE3D.EXE\nexit\n\n", code);
+	add(@"[autoexec]\nmount c \"Games/Duke Nukem 3D\"\nc:\nDUKE3D.EXE\nexit\n\n", code);
 	add(@"The last line, exit, returns to the list when the game quits; "
 	    @"leave it out to stay at the DOS prompt instead.\n\n"
-	    @"A game's config can also change any DOSBox setting just for that "
-	    @"game, such as cpu_cycles in a [cpu] section. Settings for every "
-	    @"game go in dosbox.conf in the app's main folder.\n\n",
+	    @"Settings are applied in layers. dosbox.conf in the app's main folder "
+	    @"holds the starting settings for every game, and a game's own "
+	    @"dosbox.conf can change any of them just for that game, such as "
+	    @"cpu_cycles in a [cpu] section. A few settings the app needs (full "
+	    @"screen, and the mouse and display modes) always apply.\n\n"
+	    @"A game can also be just a settings file in the Games folder, named "
+	    @"after the game, when its files are somewhere else.\n\n",
 	    body);
 
 	add(@"Windows 3.1 games\n", heading);
-	add(@"Install them inside Windows, then add a config that starts Windows "
-	    @"with the game, like the Colonization one.\n\n",
+	add(@"Install them inside Windows, then add a settings file that starts "
+	    @"Windows with the game, like the Colonization one.\n\n",
 	    body);
 
 	add(@"Removing games\n", heading);
-	add(@"Swipe left on a game to remove it from the list. Its files stay in "
-	    @"the Imported folder; delete them in the Files app if you don't need "
-	    @"them any more.\n",
+	add(@"Swipe left on a game to remove it. For a game added with +, that "
+	    @"deletes its folder and everything in it, including saved games.\n",
 	    body);
 	return result;
 }
@@ -196,6 +200,7 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	NSArray<NSString*>* _programs;
 	NSString* _cd_image;
 	void (^_completion)(NSString*);
+	bool _is_done;
 }
 
 - (instancetype)initWithFolder:(NSString*)folder
@@ -231,11 +236,6 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section
 {
-	if (_programs.count == 0) {
-		return @"There are no DOS programs in this folder. The folder was copied "
-		       @"into the Imported folder; you can add the game by hand (see "
-		       @"Adding Games).";
-	}
 	if (_cd_image) {
 		return [NSString stringWithFormat:@"%@ will be the CD drive, D:.", _cd_image];
 	}
@@ -258,17 +258,25 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 {
 	[tableView deselectRowAtIndexPath:indexPath animated:YES];
 
-	NSError* error       = nil;
-	const auto conf_name = WriteGameConf(_folder.lastPathComponent,
-	                                     _folder,
-	                                     _programs[static_cast<NSUInteger>(indexPath.row)],
-	                                     _cd_image,
-	                                     &error);
-	if (!conf_name) {
+	NSError* error = nil;
+	if (!WriteGameConf(_folder,
+	                   _programs[static_cast<NSUInteger>(indexPath.row)],
+	                   _cd_image,
+	                   &error)) {
 		show_error(self, @"Couldn't add the game", error);
 		return;
 	}
-	_completion(conf_name);
+	_is_done = true;
+	_completion(_folder.lastPathComponent);
+}
+
+// Going back without choosing a program cancels adding the game
+- (void)viewDidDisappear:(BOOL)animated
+{
+	[super viewDidDisappear:animated];
+	if (!_is_done && self.isMovingFromParentViewController) {
+		[NSFileManager.defaultManager removeItemAtPath:_folder error:nil];
+	}
 }
 
 @end
@@ -276,8 +284,9 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 // The list of games
 
 @interface DBLibraryViewController : UITableViewController <UIDocumentPickerDelegate>
-@property(nonatomic, copy) NSArray<NSString*>* confs;
-@property(nonatomic, copy) NSString* chosenConf;
+@property(nonatomic, copy) NSDictionary<NSString*, NSString*>* games;
+@property(nonatomic, copy) NSArray<NSString*>* names;
+@property(nonatomic, copy) NSString* chosenGame;
 - (void)showHelp;
 @end
 
@@ -288,7 +297,7 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	self = [super initWithStyle:UITableViewStyleInsetGrouped];
 	if (self) {
 		self.title = @"Games";
-		self.confs = find_game_confs();
+		[self loadGames];
 	}
 	return self;
 }
@@ -309,9 +318,15 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	               action:@selector(showHelp)];
 }
 
+- (void)loadGames
+{
+	self.games = FindGames();
+	self.names = sorted_names(self.games);
+}
+
 - (void)reload
 {
-	self.confs = find_game_confs();
+	[self loadGames];
 	[self.tableView reloadData];
 }
 
@@ -365,10 +380,28 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 		return;
 	}
 
+	const auto programs = FindGamePrograms(folder);
+	if (programs.count == 0) {
+		[NSFileManager.defaultManager removeItemAtPath:folder error:nil];
+
+		auto alert = [UIAlertController
+		        alertControllerWithTitle:@"No DOS programs found"
+		                         message:[NSString stringWithFormat:
+		                                                   @"There's nothing in %@ that DOS can run. "
+		                                                   @"For a Windows 3.1 game, see Adding Games (?).",
+		                                                   folder.lastPathComponent]
+		                  preferredStyle:UIAlertControllerStyleAlert];
+		[alert addAction:[UIAlertAction actionWithTitle:@"OK"
+		                                          style:UIAlertActionStyleDefault
+		                                        handler:nil]];
+		[self presentViewController:alert animated:YES completion:nil];
+		return;
+	}
+
 	__weak DBLibraryViewController* weak_self = self;
 	auto picker = [[DBProgramPickerViewController alloc]
 	        initWithFolder:folder
-	              programs:FindGamePrograms(folder)
+	              programs:programs
 	            completion:^(NSString*) {
 		            [weak_self reload];
 		            [weak_self.navigationController popToRootViewControllerAnimated:YES];
@@ -378,12 +411,12 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section
 {
-	return static_cast<NSInteger>(self.confs.count);
+	return static_cast<NSInteger>(self.names.count);
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section
 {
-	if (self.confs.count == 0) {
+	if (self.names.count == 0) {
 		return @"No games yet. Tap + to add one, or ? to see how.";
 	}
 	return nil;
@@ -395,8 +428,7 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	auto cell = [tableView dequeueReusableCellWithIdentifier:@"game"
 	                                            forIndexPath:indexPath];
 	auto content  = cell.defaultContentConfiguration;
-	content.text  = self.confs[static_cast<NSUInteger>(indexPath.row)]
-	                       .stringByDeletingPathExtension;
+	content.text  = self.names[static_cast<NSUInteger>(indexPath.row)];
 	content.image = [UIImage systemImageNamed:@"play.rectangle"];
 	cell.contentConfiguration = content;
 	cell.accessoryType        = UITableViewCellAccessoryDisclosureIndicator;
@@ -406,27 +438,57 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)indexPath
 {
 	[tableView deselectRowAtIndexPath:indexPath animated:YES];
-	self.chosenConf = self.confs[static_cast<NSUInteger>(indexPath.row)];
+	self.chosenGame = self.names[static_cast<NSUInteger>(indexPath.row)];
 }
 
 - (UISwipeActionsConfiguration*)tableView:(UITableView*)tableView
         trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath*)indexPath
 {
-	NSString* conf = self.confs[static_cast<NSUInteger>(indexPath.row)];
+	NSString* name      = self.names[static_cast<NSUInteger>(indexPath.row)];
+	NSString* conf_path = self.games[name];
 
 	auto remove = [UIContextualAction
 	        contextualActionWithStyle:UIContextualActionStyleDestructive
 	                            title:@"Remove"
 	                          handler:^(UIContextualAction*, UIView*, void (^done)(BOOL)) {
-		                          const auto path = [GamesFolder
-		                                  stringByAppendingPathComponent:conf];
-		                          const auto removed = [NSFileManager.defaultManager
-		                                  removeItemAtPath:path
-		                                             error:nil];
-		                          [self reload];
-		                          done(removed);
+		                          [self confirmRemoving:name
+		                                       confPath:conf_path
+		                                     completion:done];
 	                          }];
 	return [UISwipeActionsConfiguration configurationWithActions:@[remove]];
+}
+
+// A game folder holds the game's files and saved games, so ask first
+- (void)confirmRemoving:(NSString*)name
+               confPath:(NSString*)conf_path
+             completion:(void (^)(BOOL))done
+{
+	const auto is_folder = IsGameFolder(conf_path);
+	const auto target    = is_folder ? conf_path.stringByDeletingLastPathComponent
+	                                 : conf_path;
+
+	auto alert = [UIAlertController
+	        alertControllerWithTitle:[NSString stringWithFormat:@"Remove %@?", name]
+	                         message:is_folder ? @"This deletes the game's folder, with all its "
+	                                             @"files and saved games."
+	                                           : @"This deletes the game's settings file; the "
+	                                             @"game's files stay where they are."
+	                  preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+	                                          style:UIAlertActionStyleCancel
+	                                        handler:^(UIAlertAction*) {
+		                                        done(NO);
+	                                        }]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Remove"
+	                                          style:UIAlertActionStyleDestructive
+	                                        handler:^(UIAlertAction*) {
+		                                        const auto removed = [NSFileManager.defaultManager
+		                                                removeItemAtPath:target
+		                                                           error:nil];
+		                                        [self reload];
+		                                        done(removed);
+	                                        }]];
+	[self presentViewController:alert animated:YES completion:nil];
 }
 
 @end
@@ -450,9 +512,7 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 	auto library = [[DBLibraryViewController alloc] init];
 
 	if (const auto name = next_autopick()) {
-		library.chosenConf = [NSString stringWithFormat:@"%s.%@",
-		                                                name->c_str(),
-		                                                ConfExtension];
+		library.chosenGame = @(name->c_str());
 	} else {
 		// Wait for the window scene; on first launch the library can be
 		// shown before UIKit has connected it
@@ -475,13 +535,19 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 
 		// The emulator owns the main thread, so run the main run loop
 		// here until a game is picked
-		while (!library.chosenConf) {
+		while (!library.chosenGame) {
 			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
 		}
 		window.hidden = YES;
 	}
 
-	const auto conf_path = [GamesFolder stringByAppendingPathComponent:library.chosenConf];
+	std::vector<std::string> args = {program_path};
 
-	return {program_path, "--conf", conf_path.UTF8String};
+	if (NSString* conf_path = library.games[library.chosenGame]) {
+		args.insert(args.end(), {"--conf", conf_path.UTF8String});
+	}
+	for (const auto& setting : RequiredSettings) {
+		args.insert(args.end(), {"--set", setting});
+	}
+	return args;
 }
