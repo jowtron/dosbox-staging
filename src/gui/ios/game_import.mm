@@ -194,3 +194,117 @@ bool WriteGameConf(NSString* folder, NSString* program, NSString* cd_image, NSEr
 
 	return [conf writeToFile:conf_path atomically:YES encoding:NSUTF8StringEncoding error:error];
 }
+
+// Reading and changing single settings in a config file, leaving the rest
+// of the file (comments, [autoexec]) as it is
+
+static NSString* trimmed(NSString* text)
+{
+	return [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+}
+
+static bool is_section_header(NSString* line)
+{
+	return [trimmed(line) hasPrefix:@"["];
+}
+
+static bool is_section(NSString* line, NSString* section)
+{
+	return [trimmed(line).lowercaseString
+	        isEqualToString:[NSString stringWithFormat:@"[%@]", section.lowercaseString]];
+}
+
+// The setting's name if the line sets one, otherwise nil
+static NSString* setting_name(NSString* line)
+{
+	const auto text = trimmed(line);
+	if ([text hasPrefix:@"#"]) {
+		return nil;
+	}
+	const auto equals = [text rangeOfString:@"="];
+	if (equals.location == NSNotFound) {
+		return nil;
+	}
+	return trimmed([text substringToIndex:equals.location]).lowercaseString;
+}
+
+static NSMutableArray<NSString*>* read_lines(NSString* path)
+{
+	const auto text = [NSString stringWithContentsOfFile:path
+	                                            encoding:NSUTF8StringEncoding
+	                                               error:nil];
+	return [[(text ?: @"") componentsSeparatedByString:@"\n"] mutableCopy];
+}
+
+// The index of the line setting 'key' in 'section', or NSNotFound
+static NSUInteger find_setting(NSArray<NSString*>* lines, NSString* section, NSString* key)
+{
+	bool in_section = false;
+	for (NSUInteger i = 0; i < lines.count; ++i) {
+		if (is_section_header(lines[i])) {
+			in_section = is_section(lines[i], section);
+		} else if (in_section && [setting_name(lines[i]) isEqualToString:key.lowercaseString]) {
+			return i;
+		}
+	}
+	return NSNotFound;
+}
+
+NSString* ReadConfValue(NSString* path, NSString* section, NSString* key)
+{
+	const auto lines = read_lines(path);
+	const auto index = find_setting(lines, section, key);
+	if (index == NSNotFound) {
+		return nil;
+	}
+	const auto line = lines[index];
+	return trimmed([line substringFromIndex:[line rangeOfString:@"="].location + 1]);
+}
+
+bool WriteConfValue(NSString* path, NSString* section, NSString* key, NSString* value)
+{
+	auto lines       = read_lines(path);
+	const auto index = find_setting(lines, section, key);
+	const auto line  = [NSString stringWithFormat:@"%@ = %@", key, value];
+
+	if (index != NSNotFound) {
+		if (value) {
+			lines[index] = line;
+		} else {
+			[lines removeObjectAtIndex:index];
+		}
+	} else if (value) {
+		// After the section's last setting, or in a new section ahead of
+		// [autoexec]
+		NSUInteger insert_at = NSNotFound;
+		bool in_section      = false;
+		for (NSUInteger i = 0; i < lines.count; ++i) {
+			if (is_section_header(lines[i])) {
+				in_section = is_section(lines[i], section);
+				if (in_section) {
+					insert_at = i + 1;
+				}
+			} else if (in_section && setting_name(lines[i])) {
+				insert_at = i + 1;
+			}
+		}
+		if (insert_at != NSNotFound) {
+			[lines insertObject:line atIndex:insert_at];
+		} else {
+			NSUInteger autoexec = lines.count;
+			for (NSUInteger i = 0; i < lines.count; ++i) {
+				if (is_section(lines[i], @"autoexec")) {
+					autoexec = i;
+					break;
+				}
+			}
+			[lines insertObjects:@[[NSString stringWithFormat:@"[%@]", section], line, @""]
+			           atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(autoexec, 3)]];
+		}
+	}
+
+	return [[lines componentsJoinedByString:@"\n"] writeToFile:path
+	                                                atomically:YES
+	                                                  encoding:NSUTF8StringEncoding
+	                                                     error:nil];
+}

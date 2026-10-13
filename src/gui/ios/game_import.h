@@ -40,4 +40,12 @@ NSString* FindGameCdImage(NSString* folder);
 bool WriteGameConf(NSString* folder, NSString* program, NSString* cd_image,
                    NSError** error);
 
+// A setting's value in a config file, or nil if it isn't set there
+NSString* ReadConfValue(NSString* path, NSString* section, NSString* key);
+
+// Sets a setting in a config file, or removes it if 'value' is nil. The
+// rest of the file (comments, [autoexec]) is left as it is; a new section
+// goes ahead of [autoexec].
+bool WriteConfValue(NSString* path, NSString* section, NSString* key, NSString* value);
+
 #endif // DOSBOX_IOS_GAME_IMPORT_H

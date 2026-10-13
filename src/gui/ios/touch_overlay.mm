@@ -5,6 +5,9 @@
 
 #include "dosbox.h"
 
+#include "gui/ios/game_settings.h"
+#include "gui/ios/library.h"
+
 #include "hardware/memory.h"
 #include "ints/bios.h"
 
@@ -127,8 +130,6 @@ void click_at(const CGPoint point, const Uint8 button)
 		               click(button);
 	               });
 }
-
-NSString* const DirectTouchDefaultsKey = @"DirectTouch";
 
 // The Game keys go down the left side as a column on screens at least this
 // wide for their height (phones in landscape)
@@ -728,7 +729,7 @@ constexpr float ColonizationUnits = 6.0f;
 	UIButton* _numpadToggle;
 	UIButton* _gameKeysToggle;
 	UIButton* _pointerToggle;
-	UIButton* _libraryButton;
+	UIButton* _menuButton;
 	NSTimer* _lock_keys_timer;
 	UILongPressGestureRecognizer* _hold;
 	CGPoint _last_drag_point;
@@ -808,12 +809,15 @@ constexpr float ColonizationUnits = 6.0f;
 	_numpadToggle   = [self makeToggle:@"123" action:@selector(toggleNumpad)];
 	_gameKeysToggle = [self makeToggle:@"Game" action:@selector(toggleGameKeys)];
 	_pointerToggle  = [self makeToggle:nil action:@selector(togglePointerMode)];
-	_libraryButton  = [self makeToggle:nil action:@selector(confirmQuitToLibrary)];
+	_menuButton     = [self makeToggle:nil action:nil];
+	_menuButton.menu = [self makeMenu];
+	_menuButton.showsMenuAsPrimaryAction = YES;
 
-	auto defaults = NSUserDefaults.standardUserDefaults;
-	_direct_touch = ([defaults objectForKey:DirectTouchDefaultsKey] == nil) ||
-	                [defaults boolForKey:DirectTouchDefaultsKey];
-	[self refreshPointerToggle];
+	[self refreshGameSettings];
+	[NSNotificationCenter.defaultCenter addObserver:self
+	                                       selector:@selector(refreshGameSettings)
+	                                           name:GameSettingsChangedNotification
+	                                         object:nil];
 
 	auto symbol_config = [UIImageSymbolConfiguration
 	        configurationWithPointSize:22.0
@@ -821,7 +825,7 @@ constexpr float ColonizationUnits = 6.0f;
 	[_keyboardToggle setImage:[UIImage systemImageNamed:@"keyboard"
 	                                    withConfiguration:symbol_config]
 	                 forState:UIControlStateNormal];
-	[_libraryButton setImage:[UIImage systemImageNamed:@"square.grid.2x2"
+	[_menuButton setImage:[UIImage systemImageNamed:@"line.3.horizontal"
 	                                   withConfiguration:symbol_config]
 	                forState:UIControlStateNormal];
 
@@ -836,7 +840,9 @@ constexpr float ColonizationUnits = 6.0f;
 	toggle.tintColor       = UIColor.whiteColor;
 	toggle.backgroundColor = [UIColor colorWithWhite:0.3 alpha:0.5];
 	toggle.layer.cornerRadius = 10.0;
-	[toggle addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+	if (action) {
+		[toggle addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+	}
 	[self addSubview:toggle];
 	return toggle;
 }
@@ -940,36 +946,126 @@ constexpr float ColonizationUnits = 6.0f;
 	                                   safe.top + 12,
 	                                   ToggleWidth,
 	                                   ToggleHeight);
-	_pointerToggle.frame = CGRectMake(toggle_right - 4 * ToggleWidth - 3 * ToggleGap,
+	const auto pointer_slot = _gameKeysToggle.hidden ? 3 : 4;
+	_pointerToggle.frame = CGRectMake(toggle_right - pointer_slot * ToggleWidth -
+	                                          (pointer_slot - 1) * ToggleGap,
 	                                  safe.top + 12,
 	                                  ToggleWidth,
 	                                  ToggleHeight);
 
-	// Back to the library, away from the other toggles in the top-left
-	// corner
-	_libraryButton.frame = CGRectMake(safe.left + 12,
+	// The menu (settings, restart, back to the library), away from the
+	// other toggles in the top-left corner
+	_menuButton.frame = CGRectMake(safe.left + 12,
 	                                  safe.top + 12,
 	                                  ToggleWidth,
 	                                  ToggleHeight);
 }
 
-- (void)confirmQuitToLibrary
+// The in-game menu. It's rebuilt each time it opens, so Pause shows the
+// current state.
+- (UIMenu*)makeMenu
+{
+	__weak DBTouchOverlay* weak_self = self;
+	auto items = [UIDeferredMenuElement
+	        elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement*>*)) {
+		        completion([weak_self menuItems]);
+	        }];
+	return [UIMenu menuWithChildren:@[items]];
+}
+
+- (NSArray<UIMenuElement*>*)menuItems
+{
+	__weak DBTouchOverlay* weak_self = self;
+
+	auto settings = [UIAction actionWithTitle:@"Game Settings"
+	                                    image:[UIImage systemImageNamed:@"gearshape"]
+	                               identifier:nil
+	                                  handler:^(UIAction*) {
+		                                  [weak_self showGameSettings];
+	                                  }];
+	settings.attributes = CurrentGameName() ? 0 : UIMenuElementAttributesDisabled;
+
+	const auto is_paused = DOSBOX_IsPaused();
+	auto pause = [UIAction actionWithTitle:is_paused ? @"Resume" : @"Pause"
+	                                 image:[UIImage systemImageNamed:is_paused ? @"play" : @"pause"]
+	                            identifier:nil
+	                               handler:^(UIAction*) {
+		                               if (DOSBOX_IsPaused()) {
+			                               DOSBOX_RequestUserResume();
+		                               } else {
+			                               DOSBOX_RequestUserPause();
+		                               }
+	                               }];
+
+	auto restart = [UIAction actionWithTitle:@"Restart Game"
+	                                   image:[UIImage systemImageNamed:@"arrow.counterclockwise"]
+	                              identifier:nil
+	                                 handler:^(UIAction*) {
+		                                 [weak_self confirm:@"Restart the game?"
+		                                             action:@"Restart"
+		                                            handler:^{
+			                                            IOS_RestartGame();
+		                                            }];
+	                                 }];
+	restart.attributes = CurrentGameName() ? 0 : UIMenuElementAttributesDisabled;
+
+	auto quit = [UIAction actionWithTitle:@"Quit to Library"
+	                                image:[UIImage systemImageNamed:@"square.grid.2x2"]
+	                           identifier:nil
+	                              handler:^(UIAction*) {
+		                              [weak_self confirm:@"Quit to the library?"
+		                                          action:@"Quit"
+		                                         handler:^{
+			                                         DOSBOX_RequestShutdown();
+		                                         }];
+	                              }];
+	quit.attributes = UIMenuElementAttributesDestructive;
+
+	return @[settings, pause, restart, quit];
+}
+
+- (void)confirm:(NSString*)title action:(NSString*)action_title handler:(void (^)())handler
 {
 	auto alert = [UIAlertController
-	        alertControllerWithTitle:@"Quit to the library?"
+	        alertControllerWithTitle:title
 	                         message:@"Anything not saved in the game will be lost."
 	                  preferredStyle:UIAlertControllerStyleAlert];
 	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
 	                                          style:UIAlertActionStyleCancel
 	                                        handler:nil]];
-	[alert addAction:[UIAlertAction actionWithTitle:@"Quit"
+	[alert addAction:[UIAlertAction actionWithTitle:action_title
 	                                          style:UIAlertActionStyleDestructive
 	                                        handler:^(UIAlertAction*) {
-		                                        DOSBOX_RequestShutdown();
+		                                        handler();
 	                                        }]];
 	[self.window.rootViewController presentViewController:alert
 	                                             animated:YES
 	                                           completion:nil];
+}
+
+- (void)showGameSettings
+{
+	auto settings = MakeGameSettingsController(CurrentGameName(), CurrentGameConfPath(), nil);
+	auto navigation = [[UINavigationController alloc] initWithRootViewController:settings];
+	navigation.modalPresentationStyle = UIModalPresentationFormSheet;
+	[self.window.rootViewController presentViewController:navigation
+	                                             animated:YES
+	                                           completion:nil];
+}
+
+// Mouse mode and game keys are chosen per game
+- (void)refreshGameSettings
+{
+	NSString* const game = CurrentGameName();
+
+	_direct_touch = IsDirectTouch(game);
+	[self refreshPointerToggle];
+
+	_gameKeysToggle.hidden = (GameKeysPanel(game) == nil);
+	if (_gameKeysToggle.hidden) {
+		_gameKeys.hidden = YES;
+	}
+	[self setNeedsLayout];
 }
 
 // Stops the timer, which reads the emulated BIOS data area, before the
@@ -978,6 +1074,7 @@ constexpr float ColonizationUnits = 6.0f;
 {
 	[_lock_keys_timer invalidate];
 	_lock_keys_timer = nil;
+	[NSNotificationCenter.defaultCenter removeObserver:self];
 	[self removeFromSuperview];
 }
 
@@ -1052,9 +1149,10 @@ constexpr float ColonizationUnits = 6.0f;
 - (void)togglePointerMode
 {
 	_direct_touch = !_direct_touch;
-	[NSUserDefaults.standardUserDefaults setBool:_direct_touch
-	                                      forKey:DirectTouchDefaultsKey];
 	[self refreshPointerToggle];
+	if (CurrentGameName()) {
+		SetDirectTouch(CurrentGameName(), _direct_touch);
+	}
 }
 
 // The toggle shows the current mode: a tapping hand for direct touch, a
@@ -1109,7 +1207,7 @@ constexpr float ColonizationUnits = 6.0f;
 	         [touch.view isDescendantOfView:_numpadToggle] ||
 	         [touch.view isDescendantOfView:_gameKeysToggle] ||
 	         [touch.view isDescendantOfView:_pointerToggle] ||
-	         [touch.view isDescendantOfView:_libraryButton]);
+	         [touch.view isDescendantOfView:_menuButton]);
 }
 
 - (void)onPan:(UIPanGestureRecognizer*)pan

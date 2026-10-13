@@ -605,7 +605,12 @@ static void wait_for_pid(const int wait_pid)
 // DOSPAD_AUTOPICK in library.mm.
 static Uint32 SDLCALL autoquit_game(void*, SDL_TimerID, Uint32)
 {
-	DOSBOX_RequestShutdown();
+	// With DOSPAD_AUTOQUIT_RESTART set, the game restarts instead
+	if (std::getenv("DOSPAD_AUTOQUIT_RESTART")) {
+		IOS_RestartGame();
+	} else {
+		DOSBOX_RequestShutdown();
+	}
 	return 0;
 }
 #else

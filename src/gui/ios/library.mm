@@ -4,6 +4,9 @@
 #include "gui/ios/library.h"
 
 #include "gui/ios/game_import.h"
+#include "gui/ios/game_settings.h"
+
+#include "dosbox.h"
 
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -25,7 +28,13 @@ const std::vector<std::string> RequiredSettings = {
         "sdl presentation_mode=host-rate",
         // The touch overlay's direct touch mode needs absolute pointing
         "mouse mouse_capture=seamless",
+        // Pause while the app is in the background (or the Control Centre
+        // or a call covers it)
+        "sdl pause_when_inactive=true",
 };
+
+// The game to start again without showing the library
+NSString* restarting_game = nil;
 
 NSArray<NSString*>* sorted_names(NSDictionary<NSString*, NSString*>* games)
 {
@@ -288,6 +297,8 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 @property(nonatomic, copy) NSArray<NSString*>* names;
 @property(nonatomic, copy) NSString* chosenGame;
 - (void)showHelp;
+- (void)addGame;
+- (void)showSettings:(NSString*)name;
 @end
 
 @implementation DBLibraryViewController
@@ -342,6 +353,25 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	        initForOpeningContentTypes:@[UTTypeFolder]];
 	picker.delegate = self;
 	[self presentViewController:picker animated:YES completion:nil];
+
+	// The picker's own close button is only on its top level, so add one
+	// that's always there
+	auto config        = UIButtonConfiguration.filledButtonConfiguration;
+	config.title       = @"Cancel";
+	config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+	__weak UIDocumentPickerViewController* weak_picker = picker;
+	auto cancel = [UIButton buttonWithConfiguration:config
+	                                  primaryAction:[UIAction actionWithHandler:^(UIAction*) {
+		                                  [weak_picker dismissViewControllerAnimated:YES
+		                                                                  completion:nil];
+	                                  }]];
+	cancel.translatesAutoresizingMaskIntoConstraints = NO;
+	[picker.view addSubview:cancel];
+	const auto guide = picker.view.safeAreaLayoutGuide;
+	[NSLayoutConstraint activateConstraints:@[
+		[cancel.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:16],
+		[cancel.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor constant:-8],
+	]];
 }
 
 - (void)documentPicker:(UIDocumentPickerViewController*)controller
@@ -431,7 +461,7 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	content.text  = self.names[static_cast<NSUInteger>(indexPath.row)];
 	content.image = [UIImage systemImageNamed:@"play.rectangle"];
 	cell.contentConfiguration = content;
-	cell.accessoryType        = UITableViewCellAccessoryDisclosureIndicator;
+	cell.accessoryType        = UITableViewCellAccessoryDetailButton;
 	return cell;
 }
 
@@ -439,6 +469,22 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 {
 	[tableView deselectRowAtIndexPath:indexPath animated:YES];
 	self.chosenGame = self.names[static_cast<NSUInteger>(indexPath.row)];
+}
+
+// The (i) button opens the game's settings
+- (void)tableView:(UITableView*)tableView
+        accessoryButtonTappedForRowWithIndexPath:(NSIndexPath*)indexPath
+{
+	[self showSettings:self.names[static_cast<NSUInteger>(indexPath.row)]];
+}
+
+- (void)showSettings:(NSString*)name
+{
+	__weak DBLibraryViewController* weak_self = self;
+	auto settings = MakeGameSettingsController(name, self.games[name], ^(NSString*) {
+		[weak_self reload];
+	});
+	[self.navigationController pushViewController:settings animated:YES];
 }
 
 - (UISwipeActionsConfiguration*)tableView:(UITableView*)tableView
@@ -508,10 +554,14 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 	static UIWindow* window = nil;
 
 	maybe_import_for_testing();
+	SetCurrentGame(nil, nil);
 
 	auto library = [[DBLibraryViewController alloc] init];
 
-	if (const auto name = next_autopick()) {
+	if (restarting_game) {
+		library.chosenGame = restarting_game;
+		restarting_game    = nil;
+	} else if (const auto name = next_autopick()) {
 		library.chosenGame = @(name->c_str());
 	} else {
 		// Wait for the window scene; on first launch the library can be
@@ -528,9 +578,16 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 		        initWithRootViewController:library];
 		[window makeKeyAndVisible];
 
-		// Test hook: open the help page (for screenshots)
+		// Test hooks: open the help page, the folder picker or a game's
+		// settings (for screenshots)
 		if (std::getenv("DOSPAD_SHOW_HELP")) {
 			[library showHelp];
+		}
+		if (std::getenv("DOSPAD_SHOW_PICKER")) {
+			[library addGame];
+		}
+		if (const auto name = std::getenv("DOSPAD_SHOW_SETTINGS")) {
+			[library showSettings:@(name)];
 		}
 
 		// The emulator owns the main thread, so run the main run loop
@@ -545,9 +602,16 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 
 	if (NSString* conf_path = library.games[library.chosenGame]) {
 		args.insert(args.end(), {"--conf", conf_path.UTF8String});
+		SetCurrentGame(library.chosenGame, conf_path);
 	}
 	for (const auto& setting : RequiredSettings) {
 		args.insert(args.end(), {"--set", setting});
 	}
 	return args;
+}
+
+void IOS_RestartGame()
+{
+	restarting_game = CurrentGameName();
+	DOSBOX_RequestShutdown();
 }

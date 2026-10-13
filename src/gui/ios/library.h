@@ -14,4 +14,7 @@
 // game), layered on top of the shared 'Documents/dosbox.conf'.
 std::vector<std::string> IOS_ChooseGame(const std::string& program_path);
 
+// Ends the current game and starts it again, without showing the library
+void IOS_RestartGame();
+
 #endif // DOSBOX_IOS_LIBRARY_H
