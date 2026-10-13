@@ -4,8 +4,11 @@
 #include "gui/ios/game_settings.h"
 
 #include "gui/ios/game_import.h"
+#include "gui/ios/windows_display.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <vector>
 
 NSString* const GameSettingsChangedNotification = @"DBGameSettingsChanged";
@@ -139,10 +142,6 @@ const std::vector<ConfSetting>& conf_settings()
 	         @"dosbox",
 	         @[@"memsize"],
 	         {{@"4 MB", @"4"}, {@"8 MB", @"8"}, {@"16 MB", @"16"}, {@"32 MB", @"32"}, {@"64 MB", @"64"}}},
-	        {@"Music",
-	         @"midi",
-	         @[@"mididevice"],
-	         {{@"SoundFont", @"fluidsynth"}, {@"Roland MT-32", @"mt32"}, {@"Off", @"none"}}},
 	        {@"Picture",
 	         @"render",
 	         @[@"aspect"],
@@ -151,6 +150,90 @@ const std::vector<ConfSetting>& conf_settings()
 	          {@"Fill the screen", @"stretch"}}},
 	};
 	return settings;
+}
+
+// The SoundFonts the user has added, and any in Staging's own folder
+NSArray<NSString*>* find_soundfonts()
+{
+	const auto staging_folder = [NSHomeDirectory()
+	        stringByAppendingPathComponent:@"Library/Preferences/DOSBox/soundfonts"];
+
+	auto names = [NSMutableSet<NSString*> set];
+	for (NSString* folder in @[SoundFontsFolder, staging_folder]) {
+		for (NSString* item in [NSFileManager.defaultManager contentsOfDirectoryAtPath:folder
+		                                                                         error:nil]) {
+			const auto extension = item.pathExtension.lowercaseString;
+			if ([extension isEqualToString:@"sf2"] || [extension isEqualToString:@"sf3"]) {
+				[names addObject:item];
+			}
+		}
+	}
+	return [names.allObjects sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+}
+
+bool has_mt32_roms()
+{
+	for (NSString* item in [NSFileManager.defaultManager contentsOfDirectoryAtPath:Mt32RomsFolder
+	                                                                         error:nil]) {
+		if (![item hasPrefix:@"."]) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// A Windows screen size that fills the display. 1.5 pixels per point keeps
+// Windows' text readable: 1264x584 on an iPhone 14, 1920x1440 on a 12.9"
+// iPad Pro. Staging's custom VESA mode is at most 1920x1440, with the width
+// a multiple of 8.
+NSString* fit_screen_size()
+{
+	CGSize screen = {1024, 768};
+	for (UIScene* scene in UIApplication.sharedApplication.connectedScenes) {
+		if ([scene isKindOfClass:UIWindowScene.class]) {
+			screen = static_cast<UIWindowScene*>(scene).screen.bounds.size;
+			break;
+		}
+	}
+	constexpr double PixelsPerPoint = 1.5;
+	constexpr double MaxWidth       = 1920;
+	constexpr double MaxHeight      = 1440;
+
+	const auto width  = std::max(screen.width, screen.height) * PixelsPerPoint;
+	const auto height = std::min(screen.width, screen.height) * PixelsPerPoint;
+	const auto scale  = std::min({1.0, MaxWidth / width, MaxHeight / height});
+
+	const auto round_to_8 = [](const double value) {
+		return static_cast<int>(std::lround(value / 8)) * 8;
+	};
+	return [NSString stringWithFormat:@"%dx%d",
+	                                  std::min(round_to_8(width * scale), static_cast<int>(MaxWidth)),
+	                                  std::min(round_to_8(height * scale), static_cast<int>(MaxHeight))];
+}
+
+ConfSetting screen_size_setting()
+{
+	const auto fit   = fit_screen_size();
+	auto setting     = ConfSetting{@"Screen size", @"dosbox", @[@"vesa_custom_resolution"], {}};
+	setting.choices  = {{[NSString stringWithFormat:@"Fit the screen (%@)", fit], fit}};
+	for (NSString* size in @[@"640x480", @"800x600", @"1024x768", @"1280x960"]) {
+		if (![size isEqualToString:fit]) {
+			setting.choices.push_back({size, size});
+		}
+	}
+	return setting;
+}
+
+UIAction* make_action(NSString* title, const bool is_on, void (^handler)())
+{
+	auto action  = [UIAction actionWithTitle:title
+	                                  image:nil
+	                             identifier:nil
+	                                handler:^(UIAction*) {
+		                                handler();
+	                                }];
+	action.state = is_on ? UIMenuElementStateOn : UIMenuElementStateOff;
+	return action;
 }
 
 UIButton* make_menu_button(UIMenu* menu)
@@ -217,9 +300,16 @@ NSString* GameKeysPanel(NSString* game)
 	NSString* _game;
 	NSString* _conf_path;
 	void (^_on_rename)(NSString*);
+
+	// The game's Windows, if it's a Windows game
+	NSString* _windows_dir;
+	bool _is_installing;
 }
 
-enum Section { NameSection, EmulatorSection, ControlsSection, SectionCount };
+// The Emulator section has the settings in 'conf_settings()', then music.
+// The Windows section has the screen size (only with VBESVGA.DRV), then the
+// display driver.
+enum Section { NameSection, EmulatorSection, WindowsSection, ControlsSection, SectionCount };
 
 - (instancetype)initWithGame:(NSString*)game
                     confPath:(NSString*)conf_path
@@ -231,6 +321,8 @@ enum Section { NameSection, EmulatorSection, ControlsSection, SectionCount };
 		_conf_path = conf_path;
 		_on_rename = on_rename;
 		self.title = @"Game Settings";
+
+		_windows_dir = FindGameWindows(conf_path);
 	}
 	return self;
 }
@@ -249,6 +341,16 @@ enum Section { NameSection, EmulatorSection, ControlsSection, SectionCount };
 	}
 }
 
+- (void)viewDidAppear:(BOOL)animated
+{
+	[super viewDidAppear:animated];
+
+	// Test hook: scroll down this many points (for screenshots)
+	if (const auto points = std::getenv("DOSPAD_SETTINGS_SCROLL")) {
+		[self.tableView setContentOffset:CGPointMake(0, std::atof(points)) animated:NO];
+	}
+}
+
 - (void)close
 {
 	[self.view endEditing:YES];
@@ -264,7 +366,9 @@ enum Section { NameSection, EmulatorSection, ControlsSection, SectionCount };
 {
 	switch (section) {
 	case NameSection: return 1;
-	case EmulatorSection: return static_cast<NSInteger>(conf_settings().size());
+	case EmulatorSection: return static_cast<NSInteger>(conf_settings().size()) + 1;
+	case WindowsSection:
+		return _windows_dir ? (UsesVbeSvga(_windows_dir) ? 2 : 1) : 0;
 	case ControlsSection: return 2;
 	}
 	return 0;
@@ -275,6 +379,7 @@ enum Section { NameSection, EmulatorSection, ControlsSection, SectionCount };
 	switch (section) {
 	case NameSection: return @"Name";
 	case EmulatorSection: return @"Emulator";
+	case WindowsSection: return _windows_dir ? @"Windows" : nil;
 	case ControlsSection: return @"Touch controls";
 	}
 	return nil;
@@ -286,8 +391,28 @@ enum Section { NameSection, EmulatorSection, ControlsSection, SectionCount };
 	case NameSection:
 		return _on_rename ? nil : @"The name can be changed from the library.";
 	case EmulatorSection:
-		return @"These take effect the next time the game starts. Default uses "
-		       @"the shared dosbox.conf.";
+		return [NSString stringWithFormat:
+		                         @"These take effect the next time the game starts. "
+		                         @"Default uses the shared dosbox.conf.\n\n"
+		                         @"For music, put SoundFonts (.sf2) in the soundfonts "
+		                         @"folder and MT-32 ROMs in the mt32-roms folder, in "
+		                         @"Files › On My %@ › DOSBox Staging.",
+		                         UIDevice.currentDevice.model];
+	case WindowsSection:
+		if (!_windows_dir) {
+			return nil;
+		}
+		if (UsesVbeSvga(_windows_dir)) {
+			return @"Windows is set to this size each time the game starts. "
+			       @"Games using WinG, like Colonization, test the display for a "
+			       @"few minutes the first time they run at a new size.";
+		}
+		return [NSString stringWithFormat:
+		                         @"Windows' own display drivers only offer a few fixed "
+		                         @"sizes. VBESVGA, a free driver by PluMGMK, lets Windows "
+		                         @"fill the screen. It isn't part of this app: Install "
+		                         @"downloads it from github.com/PluMGMK/vbesvga.drv.%@",
+		                         CurrentGameName() ? @"\n\nQuit the game to install it." : @""];
 	case ControlsSection:
 		return @"Direct touch clicks where your finger is. Trackpad moves the "
 		       @"pointer like a laptop's trackpad, for games that need it.";
@@ -323,10 +448,30 @@ enum Section { NameSection, EmulatorSection, ControlsSection, SectionCount };
 		return cell;
 	}
 	case EmulatorSection: {
-		const auto& setting = conf_settings()[static_cast<size_t>(indexPath.row)];
-		content.text        = setting.title;
+		const auto row = static_cast<size_t>(indexPath.row);
+		if (row == conf_settings().size()) {
+			content.text              = @"Music";
+			cell.contentConfiguration = content;
+			cell.accessoryView        = [self musicMenu];
+			return cell;
+		}
+		const auto& setting       = conf_settings()[row];
+		content.text              = setting.title;
 		cell.contentConfiguration = content;
-		cell.accessoryView = [self menuForSetting:setting];
+		cell.accessoryView        = [self menuForSetting:setting];
+		return cell;
+	}
+	case WindowsSection: {
+		if (indexPath.row == 0 && UsesVbeSvga(_windows_dir)) {
+			const auto setting        = screen_size_setting();
+			content.text              = setting.title;
+			cell.contentConfiguration = content;
+			cell.accessoryView        = [self menuForSetting:setting];
+			return cell;
+		}
+		content.text              = @"Display driver";
+		cell.contentConfiguration = content;
+		cell.accessoryView        = [self displayDriverAccessory];
 		return cell;
 	}
 	case ControlsSection: {
@@ -375,6 +520,139 @@ enum Section { NameSection, EmulatorSection, ControlsSection, SectionCount };
 		[actions addObject:action];
 	}
 	return make_menu_button([UIMenu menuWithChildren:actions]);
+}
+
+- (UIButton*)musicMenu
+{
+	NSString* const conf_path = _conf_path;
+	NSString* const device    = ReadConfValue(conf_path, @"midi", @"mididevice").lowercaseString;
+	NSString* const soundfont = ReadConfValue(conf_path, @"fluidsynth", @"soundfont");
+
+	const auto choose = ^(NSString* new_device, NSString* new_soundfont) {
+		return ^{
+			WriteConfValue(conf_path, @"midi", @"mididevice", new_device);
+			WriteConfValue(conf_path, @"fluidsynth", @"soundfont", new_soundfont);
+		};
+	};
+	const auto is_fluidsynth = [device isEqualToString:@"fluidsynth"];
+
+	auto soundfonts = [NSMutableArray<UIMenuElement*> array];
+	auto names      = [find_soundfonts() mutableCopy];
+	if (is_fluidsynth && soundfont && ![names containsObject:soundfont]) {
+		[names addObject:soundfont];
+	}
+	if (is_fluidsynth && !soundfont) {
+		[soundfonts addObject:make_action(@"Shared SoundFont", true, choose(@"fluidsynth", nil))];
+	}
+	for (NSString* name in names) {
+		const auto is_on = is_fluidsynth &&
+		                   ([soundfont caseInsensitiveCompare:name] == NSOrderedSame ||
+		                    [soundfont caseInsensitiveCompare:name.stringByDeletingPathExtension] ==
+		                            NSOrderedSame);
+		[soundfonts addObject:make_action(name.stringByDeletingPathExtension,
+		                                  is_on,
+		                                  choose(@"fluidsynth", name))];
+	}
+	if (soundfonts.count == 0) {
+		auto none = [UIAction actionWithTitle:@"No SoundFonts in the soundfonts folder"
+		                                image:nil
+		                           identifier:nil
+		                              handler:^(UIAction*) {}];
+		none.attributes = UIMenuElementAttributesDisabled;
+		[soundfonts addObject:none];
+	}
+
+	auto mt32 = make_action(@"Roland MT-32", [device isEqualToString:@"mt32"], choose(@"mt32", nil));
+	if (!has_mt32_roms()) {
+		mt32.subtitle = @"Needs ROMs in the mt32-roms folder";
+	}
+
+	auto items = [NSMutableArray<UIMenuElement*> array];
+	[items addObject:make_action(@"Default", !device && !soundfont, choose(nil, nil))];
+	[items addObject:[UIMenu menuWithTitle:@"SoundFont"
+	                                 image:nil
+	                            identifier:nil
+	                               options:UIMenuOptionsDisplayInline
+	                              children:soundfonts]];
+	[items addObject:mt32];
+	[items addObject:make_action(@"Off", [device isEqualToString:@"none"], choose(@"none", nil))];
+
+	// Another device set by hand in the config file stays selectable
+	if (device && !is_fluidsynth && ![@[@"mt32", @"none"] containsObject:device]) {
+		[items addObject:make_action(device, true, choose(device, nil))];
+	}
+	return make_menu_button([UIMenu menuWithChildren:items]);
+}
+
+- (UIView*)displayDriverAccessory
+{
+	if (UsesVbeSvga(_windows_dir) || CurrentGameName() || _is_installing) {
+		auto label = [[UILabel alloc] init];
+		label.text = UsesVbeSvga(_windows_dir) ? @"VBESVGA"
+		             : _is_installing          ? @"Installing…"
+		                                       : @"Windows standard";
+		label.textColor = UIColor.secondaryLabelColor;
+		[label sizeToFit];
+		return label;
+	}
+	auto button = [UIButton
+	        buttonWithConfiguration:UIButtonConfiguration.plainButtonConfiguration
+	                  primaryAction:[UIAction actionWithTitle:@"Install VBESVGA"
+	                                                    image:nil
+	                                               identifier:nil
+	                                                  handler:^(UIAction*) {
+		                                                  [self confirmInstall];
+	                                                  }]];
+	[button sizeToFit];
+	return button;
+}
+
+- (void)confirmInstall
+{
+	auto alert = [UIAlertController
+	        alertControllerWithTitle:@"Install VBESVGA?"
+	                         message:@"This downloads the latest release of PluMGMK's "
+	                                 @"VBESVGA.DRV from github.com/PluMGMK/vbesvga.drv and "
+	                                 @"makes it Windows' display driver. Windows' old "
+	                                 @"settings are kept in SYSTEM.BAK."
+	                  preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+	                                          style:UIAlertActionStyleCancel
+	                                        handler:nil]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Install"
+	                                          style:UIAlertActionStyleDefault
+	                                        handler:^(UIAlertAction*) {
+		                                        [self install];
+	                                        }]];
+	[self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)install
+{
+	_is_installing = true;
+	[self.tableView reloadData];
+
+	NSString* const conf_path = _conf_path;
+	InstallVbeSvga(_windows_dir, ^(NSError* error) {
+		self->_is_installing = false;
+		[self.tableView reloadData];
+		if (error) {
+			auto alert = [UIAlertController alertControllerWithTitle:@"Couldn't install VBESVGA"
+			                                                 message:error.localizedDescription
+			                                          preferredStyle:UIAlertControllerStyleAlert];
+			[alert addAction:[UIAlertAction actionWithTitle:@"OK"
+			                                          style:UIAlertActionStyleDefault
+			                                        handler:nil]];
+			[self presentViewController:alert animated:YES completion:nil];
+			return;
+		}
+		// Without a size, the driver picks 1024x768
+		if (!ReadConfValue(conf_path, @"dosbox", @"vesa_custom_resolution") &&
+		    !ReadConfValue(@"dosbox.conf", @"dosbox", @"vesa_custom_resolution")) {
+			WriteConfValue(conf_path, @"dosbox", @"vesa_custom_resolution", fit_screen_size());
+			[self.tableView reloadData];
+		}
+	});
 }
 
 - (UIButton*)mouseMenu
@@ -448,8 +726,9 @@ enum Section { NameSection, EmulatorSection, ControlsSection, SectionCount };
 		[self presentViewController:alert animated:YES completion:nil];
 		return;
 	}
-	_game      = new_name;
-	_conf_path = new_conf_path;
+	_game        = new_name;
+	_conf_path   = new_conf_path;
+	_windows_dir = FindGameWindows(new_conf_path);
 	_on_rename(new_name);
 
 	// The menus hold the old name and path

@@ -428,6 +428,11 @@ static std::deque<std_fs::path> get_platform_rom_dirs()
 static std::deque<std_fs::path> get_platform_rom_dirs()
 {
 	return {
+#if defined(DOSBOX_PLATFORM_IOS)
+	        // The app's own folder, which the user can reach from the Files
+	        // app
+	        resolve_home("~/Documents") / DefaultMt32RomsDir,
+#endif
 	        get_config_dir() / DefaultMt32RomsDir,
 	        resolve_home("~/Library/Audio/Sounds/MT32-Roms/"),
 	        "/usr/local/share/mt32-rom-data/",
@@ -880,7 +885,7 @@ void MT32_ListDevices(MidiDeviceMt32* device, MoreOutputStrings& output)
 
 		const auto active_prefix = (is_active ? "*" : " ");
 		const auto model_string  = format_str(
-                        "%s%s%s%s", color, active_prefix, display_name, reset);
+		        "%s%s%s%s", color, active_prefix, display_name, reset);
 
 		return convert_ansi_markup(model_string);
 	};

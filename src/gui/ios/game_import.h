@@ -16,6 +16,13 @@
 
 extern NSString* const GamesFolder;
 
+// Where the user puts SoundFonts and MT-32 ROMs; Staging looks there too
+extern NSString* const SoundFontsFolder;
+extern NSString* const Mt32RomsFolder;
+
+// Creates the folders above, so they show in the Files app
+void CreateLibraryFolders();
+
 // The config file of each game in the library, keyed by the game's name
 NSDictionary<NSString*, NSString*>* FindGames();
 
@@ -47,5 +54,10 @@ NSString* ReadConfValue(NSString* path, NSString* section, NSString* key);
 // rest of the file (comments, [autoexec]) is left as it is; a new section
 // goes ahead of [autoexec].
 bool WriteConfValue(NSString* path, NSString* section, NSString* key, NSString* value);
+
+// The same for a Windows .ini file, keeping its line endings and character
+// set
+NSString* ReadIniValue(NSString* path, NSString* section, NSString* key);
+bool WriteIniValue(NSString* path, NSString* section, NSString* key, NSString* value);
 
 #endif // DOSBOX_IOS_GAME_IMPORT_H

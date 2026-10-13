@@ -123,6 +123,11 @@ static std::vector<std_fs::path> get_platform_data_dirs()
 static std::vector<std_fs::path> get_platform_data_dirs()
 {
 	return {
+#if defined(DOSBOX_PLATFORM_IOS)
+	        // The app's own folder, which the user can reach from the Files
+	        // app
+	        resolve_home("~/Documents") / DefaultSoundfontsDir,
+#endif
 	        get_config_dir() / DefaultSoundfontsDir,
 	        resolve_home("~/Library/Audio/Sounds/Banks"),
 	};
@@ -766,7 +771,7 @@ MidiDeviceFluidSynth::MidiDeviceFluidSynth()
 
 	// Start rendering audio
 	const auto render = std::bind_front(&MidiDeviceFluidSynth::Render, this);
-	renderer          = std::thread(render);
+	renderer = std::thread(render);
 	set_thread_name(renderer, "dosbox:fsynth");
 
 	// Start playback

@@ -5,6 +5,7 @@
 
 #include "gui/ios/game_import.h"
 #include "gui/ios/game_settings.h"
+#include "gui/ios/windows_display.h"
 
 #include "dosbox.h"
 
@@ -182,9 +183,26 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	    @"after the game, when its files are somewhere else.\n\n",
 	    body);
 
+	add(@"Game settings (ⓘ)\n", heading);
+	add(@"Tap ⓘ next to a game to rename it or change its settings: CPU speed, "
+	    @"memory, the picture, music, and the touch controls. They're saved "
+	    @"in the game's dosbox.conf. In a game, the same settings are in the ☰ "
+	    @"menu.\n\n",
+	    body);
+
+	add(@"Music\n", heading);
+	add(@"Many games play music through a MIDI synthesiser. Put General MIDI "
+	    @"SoundFonts (.sf2 files) in the soundfonts folder, and Roland MT-32 "
+	    @"ROMs in the mt32-roms folder, both next to the Games folder. Then "
+	    @"choose one in a game's Music setting.\n\n",
+	    body);
+
 	add(@"Windows 3.1 games\n", heading);
 	add(@"Install them inside Windows, then add a settings file that starts "
-	    @"Windows with the game, like the Colonization one.\n\n",
+	    @"Windows with the game, like the Colonization one.\n\n"
+	    @"Windows can fill the screen with VBESVGA, a free display driver by "
+	    @"PluMGMK. A Windows game's settings can download and install it, and "
+	    @"then set Windows' screen size.\n\n",
 	    body);
 
 	add(@"Removing games\n", heading);
@@ -553,6 +571,7 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 {
 	static UIWindow* window = nil;
 
+	CreateLibraryFolders();
 	maybe_import_for_testing();
 	SetCurrentGame(nil, nil);
 
@@ -603,6 +622,7 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 	if (NSString* conf_path = library.games[library.chosenGame]) {
 		args.insert(args.end(), {"--conf", conf_path.UTF8String});
 		SetCurrentGame(library.chosenGame, conf_path);
+		SyncWindowsScreenSize(conf_path);
 	}
 	for (const auto& setting : RequiredSettings) {
 		args.insert(args.end(), {"--set", setting});

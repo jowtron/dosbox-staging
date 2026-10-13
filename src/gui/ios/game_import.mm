@@ -3,7 +3,9 @@
 
 #include "gui/ios/game_import.h"
 
-NSString* const GamesFolder = @"Games";
+NSString* const GamesFolder      = @"Games";
+NSString* const SoundFontsFolder = @"soundfonts";
+NSString* const Mt32RomsFolder   = @"mt32-roms";
 
 static NSString* const GameConfName     = @"dosbox.conf";
 static NSString* const OriginalConfName = @"dosbox-original.conf";
@@ -34,6 +36,16 @@ NSDictionary<NSString*, NSString*>* FindGames()
 		}
 	}
 	return games;
+}
+
+void CreateLibraryFolders()
+{
+	for (NSString* folder in @[GamesFolder, SoundFontsFolder, Mt32RomsFolder]) {
+		[NSFileManager.defaultManager createDirectoryAtPath:folder
+		                        withIntermediateDirectories:YES
+		                                         attributes:nil
+		                                              error:nil];
+	}
 }
 
 bool IsGameFolder(NSString* conf_path)
@@ -218,7 +230,7 @@ static bool is_section(NSString* line, NSString* section)
 static NSString* setting_name(NSString* line)
 {
 	const auto text = trimmed(line);
-	if ([text hasPrefix:@"#"]) {
+	if ([text hasPrefix:@"#"] || [text hasPrefix:@";"]) {
 		return nil;
 	}
 	const auto equals = [text rangeOfString:@"="];
@@ -228,12 +240,41 @@ static NSString* setting_name(NSString* line)
 	return trimmed([text substringToIndex:equals.location]).lowercaseString;
 }
 
-static NSMutableArray<NSString*>* read_lines(NSString* path)
+namespace {
+
+// DOSBox configs are UTF-8; Windows' INI files are in its own character
+// set, which Latin-1 reads and writes back byte for byte
+struct FileFormat {
+	NSStringEncoding encoding = NSUTF8StringEncoding;
+	NSString* separator       = @" = ";
+};
+
+const FileFormat ConfFormat = {NSUTF8StringEncoding, @" = "};
+const FileFormat IniFormat  = {NSISOLatin1StringEncoding, @"="};
+
+struct Lines {
+	NSMutableArray<NSString*>* lines = nil;
+	NSString* newline                = @"\n";
+};
+
+} // namespace
+
+// The file's lines, none if it doesn't exist, or nil lines if it can't be
+// read
+static Lines read_lines(NSString* path, const FileFormat& format)
 {
-	const auto text = [NSString stringWithContentsOfFile:path
-	                                            encoding:NSUTF8StringEncoding
-	                                               error:nil];
-	return [[(text ?: @"") componentsSeparatedByString:@"\n"] mutableCopy];
+	if (![NSFileManager.defaultManager fileExistsAtPath:path]) {
+		return {[NSMutableArray arrayWithObject:@""], @"\n"};
+	}
+	auto text = [NSString stringWithContentsOfFile:path encoding:format.encoding error:nil];
+	if (!text) {
+		return {};
+	}
+	const auto is_crlf = [text containsString:@"\r\n"];
+	if (is_crlf) {
+		text = [text stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
+	}
+	return {[[text componentsSeparatedByString:@"\n"] mutableCopy], is_crlf ? @"\r\n" : @"\n"};
 }
 
 // The index of the line setting 'key' in 'section', or NSNotFound
@@ -250,10 +291,11 @@ static NSUInteger find_setting(NSArray<NSString*>* lines, NSString* section, NSS
 	return NSNotFound;
 }
 
-NSString* ReadConfValue(NSString* path, NSString* section, NSString* key)
+static NSString* read_value(NSString* path, NSString* section, NSString* key,
+                            const FileFormat& format)
 {
-	const auto lines = read_lines(path);
-	const auto index = find_setting(lines, section, key);
+	const auto lines = read_lines(path, format).lines;
+	const auto index = lines ? find_setting(lines, section, key) : NSNotFound;
 	if (index == NSNotFound) {
 		return nil;
 	}
@@ -261,17 +303,38 @@ NSString* ReadConfValue(NSString* path, NSString* section, NSString* key)
 	return trimmed([line substringFromIndex:[line rangeOfString:@"="].location + 1]);
 }
 
-bool WriteConfValue(NSString* path, NSString* section, NSString* key, NSString* value)
+static bool write_value(NSString* path, NSString* section, NSString* key, NSString* value,
+                        const FileFormat& format)
 {
-	auto lines       = read_lines(path);
+	auto [lines, newline] = read_lines(path, format);
+	if (!lines) {
+		return false;
+	}
 	const auto index = find_setting(lines, section, key);
-	const auto line  = [NSString stringWithFormat:@"%@ = %@", key, value];
+	const auto line  = [NSString stringWithFormat:@"%@%@%@", key, format.separator, value];
 
 	if (index != NSNotFound) {
 		if (value) {
 			lines[index] = line;
 		} else {
 			[lines removeObjectAtIndex:index];
+
+			// Remove the section too if that leaves it empty
+			auto header = index;
+			while (header > 0 && !is_section_header(lines[header - 1])) {
+				--header;
+			}
+			auto next = index;
+			while (next < lines.count && !is_section_header(lines[next])) {
+				++next;
+			}
+			bool is_empty = (header > 0);
+			for (auto i = header; i < next; ++i) {
+				is_empty = is_empty && (trimmed(lines[i]).length == 0);
+			}
+			if (is_empty && next < lines.count) {
+				[lines removeObjectsInRange:NSMakeRange(header - 1, next - header + 1)];
+			}
 		}
 	} else if (value) {
 		// After the section's last setting, or in a new section ahead of
@@ -303,8 +366,28 @@ bool WriteConfValue(NSString* path, NSString* section, NSString* key, NSString* 
 		}
 	}
 
-	return [[lines componentsJoinedByString:@"\n"] writeToFile:path
-	                                                atomically:YES
-	                                                  encoding:NSUTF8StringEncoding
-	                                                     error:nil];
+	return [[lines componentsJoinedByString:newline] writeToFile:path
+	                                                  atomically:YES
+	                                                    encoding:format.encoding
+	                                                       error:nil];
+}
+
+NSString* ReadConfValue(NSString* path, NSString* section, NSString* key)
+{
+	return read_value(path, section, key, ConfFormat);
+}
+
+bool WriteConfValue(NSString* path, NSString* section, NSString* key, NSString* value)
+{
+	return write_value(path, section, key, value, ConfFormat);
+}
+
+NSString* ReadIniValue(NSString* path, NSString* section, NSString* key)
+{
+	return read_value(path, section, key, IniFormat);
+}
+
+bool WriteIniValue(NSString* path, NSString* section, NSString* key, NSString* value)
+{
+	return write_value(path, section, key, value, IniFormat);
 }
