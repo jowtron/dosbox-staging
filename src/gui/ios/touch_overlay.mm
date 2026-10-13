@@ -8,12 +8,18 @@
 #include "gui/ios/game_settings.h"
 #include "gui/ios/library.h"
 
+#include "hardware/input/joystick.h"
 #include "hardware/memory.h"
 #include "ints/bios.h"
 
 #import <UIKit/UIKit.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdlib>
+#include <optional>
+#include <utility>
 #include <vector>
 
 // The overlay feeds the emulator plain SDL events, so everything downstream
@@ -717,6 +723,373 @@ constexpr float ColonizationUnits = 6.0f;
 //   - tap to left-click, tap with two fingers to right-click
 //   - press and hold, then drag, to hold the left button down (dragging)
 
+// The gamepad's stick. As arrow keys, it holds down one or two of them (the
+// eight directions); as a joystick, it moves the emulated joystick as far as
+// the finger is from the centre.
+
+namespace {
+
+enum Direction { Up = 1, Down = 2, Left = 4, Right = 8 };
+
+constexpr std::array<std::pair<int, SDL_Scancode>, 4> DirectionKeys = {
+        {{Up, SDL_SCANCODE_UP},
+         {Down, SDL_SCANCODE_DOWN},
+         {Left, SDL_SCANCODE_LEFT},
+         {Right, SDL_SCANCODE_RIGHT}}
+};
+
+// How far out (as a fraction of the stick's radius) the finger has to be
+// before the stick presses any key
+constexpr double StickDeadZone = 0.3;
+
+// The finger reaches the stick's full travel this far out
+constexpr double StickReach = 0.8;
+
+// The keys held for a stick position, which is within the unit circle
+int stick_directions(const CGPoint position)
+{
+	if (std::hypot(position.x, position.y) < StickDeadZone) {
+		return 0;
+	}
+	// Eight 45 degree sectors, counter-clockwise from the right
+	constexpr std::array<int, 8> Sectors = {
+	        Right, Up | Right, Up, Up | Left, Left, Down | Left, Down, Down | Right};
+
+	const auto angle  = std::atan2(-position.y, position.x);
+	const auto sector = static_cast<int>(std::lround(angle / (M_PI / 4)) + 8) % 8;
+	return Sectors[sector];
+}
+
+int16_t joystick_axis(const CGFloat position)
+{
+	return static_cast<int16_t>(std::lround(position * 32767));
+}
+
+void send_gamepad_action(const int action, const bool down)
+{
+	if (action == JoystickButton1 || action == JoystickButton2) {
+		JOYSTICK_Button(0, (action == JoystickButton1) ? 0 : 1, down);
+	} else {
+		push_key(static_cast<SDL_Scancode>(action), down);
+	}
+}
+
+void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
+{
+	auto circle = [UIBezierPath
+	        bezierPathWithOvalInRect:CGRectMake(centre.x - radius,
+	                                            centre.y - radius,
+	                                            2 * radius,
+	                                            2 * radius)];
+	[fill setFill];
+	[circle fill];
+	[[UIColor colorWithWhite:1.0 alpha:0.35] setStroke];
+	circle.lineWidth = 2.0;
+	[circle stroke];
+}
+
+} // namespace
+
+@interface DBGamepadStick : UIView
+@property(nonatomic) bool joystick;
+- (void)moveTo:(CGPoint)position;
+- (void)recentre;
+@end
+
+@implementation DBGamepadStick {
+	UITouch* __weak _touch;
+	CGPoint _position;
+	int _directions;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame
+{
+	self = [super initWithFrame:frame];
+	if (self) {
+		self.backgroundColor = UIColor.clearColor;
+		self.contentMode     = UIViewContentModeRedraw;
+	}
+	return self;
+}
+
+- (CGFloat)radius
+{
+	return self.bounds.size.width / 2;
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event
+{
+	return std::hypot(point.x - self.radius, point.y - self.radius) < self.radius;
+}
+
+- (void)setJoystick:(bool)joystick
+{
+	[self recentre];
+	_joystick = joystick;
+	[self setNeedsDisplay];
+}
+
+- (void)moveTo:(CGPoint)position
+{
+	_position = position;
+
+	if (_joystick) {
+		JOYSTICK_Move_X(0, joystick_axis(position.x));
+		JOYSTICK_Move_Y(0, joystick_axis(position.y));
+	} else {
+		const auto directions = stick_directions(position);
+		for (const auto& [direction, key] : DirectionKeys) {
+			if ((directions ^ _directions) & direction) {
+				push_key(key, (directions & direction) != 0);
+			}
+		}
+		_directions = directions;
+	}
+	[self setNeedsDisplay];
+}
+
+- (void)moveToTouch:(UITouch*)touch
+{
+	const auto point = [touch locationInView:self];
+	const auto reach = self.radius * StickReach;
+
+	auto position        = CGPointMake((point.x - self.radius) / reach,
+                                    (point.y - self.radius) / reach);
+	const auto distance = std::hypot(position.x, position.y);
+	if (distance > 1.0) {
+		position = CGPointMake(position.x / distance, position.y / distance);
+	}
+	[self moveTo:position];
+}
+
+- (void)recentre
+{
+	_touch = nil;
+	[self moveTo:CGPointZero];
+}
+
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+	if (!_touch) {
+		_touch = touches.anyObject;
+		[self moveToTouch:_touch];
+	}
+}
+
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+	if ([touches containsObject:_touch]) {
+		[self moveToTouch:_touch];
+	}
+}
+
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+	if ([touches containsObject:_touch]) {
+		[self recentre];
+	}
+}
+
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+	[self touchesEnded:touches withEvent:event];
+}
+
+- (void)drawRect:(CGRect)rect
+{
+	const auto radius = self.radius - 1;
+	const auto centre = CGPointMake(self.radius, self.radius);
+	draw_circle(centre, radius, [UIColor colorWithWhite:0.0 alpha:0.3]);
+
+	if (_joystick) {
+		const auto knob_radius = radius * 0.42;
+		const auto travel      = radius - knob_radius;
+		const auto knob = CGPointMake(centre.x + _position.x * travel,
+		                              centre.y + _position.y * travel);
+		draw_circle(knob, knob_radius, [UIColor colorWithWhite:1.0 alpha:_touch ? 0.5 : 0.3]);
+		return;
+	}
+
+	// An arrow for each direction, lit while its key is held
+	const std::array<std::pair<int, CGFloat>, 4> arrows = {
+	        {{Right, 0}, {Down, M_PI / 2}, {Left, M_PI}, {Up, 3 * M_PI / 2}}
+	};
+	for (const auto& [direction, angle] : arrows) {
+		const auto tip  = radius * 0.85;
+		const auto base = radius * 0.55;
+		const auto half = radius * 0.2;
+
+		auto arrow = [UIBezierPath bezierPath];
+		[arrow moveToPoint:CGPointMake(tip, 0)];
+		[arrow addLineToPoint:CGPointMake(base, -half)];
+		[arrow addLineToPoint:CGPointMake(base, half)];
+		[arrow closePath];
+		[arrow applyTransform:CGAffineTransformMakeRotation(angle)];
+		[arrow applyTransform:CGAffineTransformMakeTranslation(centre.x, centre.y)];
+
+		const auto is_held = (_directions & direction) != 0;
+		[[UIColor colorWithWhite:1.0 alpha:is_held ? 0.9 : 0.4] setFill];
+		[arrow fill];
+	}
+}
+
+@end
+
+// The gamepad's four buttons, in a diamond. A finger can slide from one
+// button to the next, and several can be held at once.
+
+@interface DBGamepadButtons : UIView
+- (void)setActions:(const std::array<int, GamepadButtonCount>&)actions;
+- (void)releaseAll;
+@end
+
+@implementation DBGamepadButtons {
+	std::array<int, GamepadButtonCount> _actions;
+	std::array<bool, GamepadButtonCount> _pressed;
+
+	// The button each finger is on
+	NSMapTable<UITouch*, NSNumber*>* _touch_buttons;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame
+{
+	self = [super initWithFrame:frame];
+	if (self) {
+		self.backgroundColor      = UIColor.clearColor;
+		self.contentMode          = UIViewContentModeRedraw;
+		self.multipleTouchEnabled = YES;
+		_actions                  = {};
+		_pressed                  = {};
+		_touch_buttons            = [NSMapTable strongToStrongObjectsMapTable];
+	}
+	return self;
+}
+
+- (void)setActions:(const std::array<int, GamepadButtonCount>&)actions
+{
+	[self releaseAll];
+	_actions = actions;
+	[self setNeedsDisplay];
+}
+
+- (CGFloat)buttonRadius
+{
+	return self.bounds.size.width * 0.19;
+}
+
+// Bottom, right, left, top
+- (CGPoint)centreOfButton:(int)button
+{
+	const auto size   = self.bounds.size.width;
+	const auto near   = self.buttonRadius + 1;
+	const auto far    = size - near;
+	const auto middle = size / 2;
+
+	const std::array<CGPoint, GamepadButtonCount> centres = {
+	        CGPointMake(middle, far),
+	        CGPointMake(far, middle),
+	        CGPointMake(near, middle),
+	        CGPointMake(middle, near)};
+	return centres[button];
+}
+
+// The nearest button within reach of a point, if any
+- (std::optional<int>)buttonAt:(CGPoint)point
+{
+	std::optional<int> nearest = {};
+	auto nearest_distance      = self.buttonRadius * 1.25;
+	for (int button = 0; button < GamepadButtonCount; ++button) {
+		const auto centre   = [self centreOfButton:button];
+		const auto distance = std::hypot(point.x - centre.x, point.y - centre.y);
+		if (distance < nearest_distance) {
+			nearest          = button;
+			nearest_distance = distance;
+		}
+	}
+	return nearest;
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event
+{
+	return [self buttonAt:point].has_value();
+}
+
+// Presses and releases buttons to match the fingers on them
+- (void)update
+{
+	std::array<bool, GamepadButtonCount> pressed = {};
+	for (UITouch* touch in _touch_buttons) {
+		pressed[[_touch_buttons objectForKey:touch].intValue] = true;
+	}
+	for (int button = 0; button < GamepadButtonCount; ++button) {
+		if (pressed[button] != _pressed[button]) {
+			send_gamepad_action(_actions[button], pressed[button]);
+		}
+	}
+	_pressed = pressed;
+	[self setNeedsDisplay];
+}
+
+- (void)releaseAll
+{
+	[_touch_buttons removeAllObjects];
+	[self update];
+}
+
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+	[self touchesMoved:touches withEvent:event];
+}
+
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+	for (UITouch* touch in touches) {
+		if (const auto button = [self buttonAt:[touch locationInView:self]]) {
+			[_touch_buttons setObject:@(*button) forKey:touch];
+		} else {
+			[_touch_buttons removeObjectForKey:touch];
+		}
+	}
+	[self update];
+}
+
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+	for (UITouch* touch in touches) {
+		[_touch_buttons removeObjectForKey:touch];
+	}
+	[self update];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event
+{
+	[self touchesEnded:touches withEvent:event];
+}
+
+- (void)drawRect:(CGRect)rect
+{
+	const auto radius = self.buttonRadius;
+	for (int button = 0; button < GamepadButtonCount; ++button) {
+		const auto centre = [self centreOfButton:button];
+		draw_circle(centre,
+		            radius,
+		            _pressed[button] ? [UIColor colorWithWhite:1.0 alpha:0.5]
+		                             : [UIColor colorWithWhite:0.0 alpha:0.3]);
+
+		NSString* const label = GamepadButtonLabel(_actions[button]);
+		NSDictionary* const attributes = @{
+			NSFontAttributeName: [UIFont systemFontOfSize:std::min(radius * 0.5, 18.0)
+			                                       weight:UIFontWeightSemibold],
+			NSForegroundColorAttributeName: UIColor.whiteColor,
+		};
+		const auto size = [label sizeWithAttributes:attributes];
+		[label drawAtPoint:CGPointMake(centre.x - size.width / 2, centre.y - size.height / 2)
+		    withAttributes:attributes];
+	}
+}
+
+@end
+
 @interface DBTouchOverlay : UIView <UIGestureRecognizerDelegate>
 - (void)shutDown;
 @end
@@ -725,7 +1098,10 @@ constexpr float ColonizationUnits = 6.0f;
 	DBKeyboardView* _keyboard;
 	DBKeyboardView* _numpad;
 	DBKeyboardView* _gameKeys;
+	DBGamepadStick* _stick;
+	DBGamepadButtons* _gamepadButtons;
 	UIButton* _keyboardToggle;
+	UIButton* _gamepadToggle;
 	UIButton* _numpadToggle;
 	UIButton* _gameKeysToggle;
 	UIButton* _pointerToggle;
@@ -734,6 +1110,8 @@ constexpr float ColonizationUnits = 6.0f;
 	UILongPressGestureRecognizer* _hold;
 	CGPoint _last_drag_point;
 	bool _direct_touch;
+	bool _shows_gamepad;
+	bool _enabled_joystick;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame
@@ -791,6 +1169,11 @@ constexpr float ColonizationUnits = 6.0f;
 	[self addSubview:_gameKeys];
 	[self makeMovable:_gameKeys];
 
+	_stick          = [[DBGamepadStick alloc] initWithFrame:CGRectZero];
+	_gamepadButtons = [[DBGamepadButtons alloc] initWithFrame:CGRectZero];
+	[self addSubview:_stick];
+	[self addSubview:_gamepadButtons];
+
 	// Keep the Num key's light in step with the emulated NumLock state,
 	// which the guest can also change
 	__weak DBTouchOverlay* weak_self = self;
@@ -808,6 +1191,7 @@ constexpr float ColonizationUnits = 6.0f;
 	_keyboardToggle = [self makeToggle:nil action:@selector(toggleKeyboard)];
 	_numpadToggle   = [self makeToggle:@"123" action:@selector(toggleNumpad)];
 	_gameKeysToggle = [self makeToggle:@"Game" action:@selector(toggleGameKeys)];
+	_gamepadToggle  = [self makeToggle:nil action:@selector(toggleGamepad)];
 	_pointerToggle  = [self makeToggle:nil action:@selector(togglePointerMode)];
 	_menuButton     = [self makeToggle:nil action:nil];
 	_menuButton.menu = [self makeMenu];
@@ -828,6 +1212,28 @@ constexpr float ColonizationUnits = 6.0f;
 	[_menuButton setImage:[UIImage systemImageNamed:@"line.3.horizontal"
 	                                   withConfiguration:symbol_config]
 	                forState:UIControlStateNormal];
+	[_gamepadToggle setImage:[UIImage systemImageNamed:@"gamecontroller"
+	                                   withConfiguration:symbol_config]
+	                forState:UIControlStateNormal];
+
+	// Test hook: after 8 seconds, hold the stick up and right and the
+	// bottom button for 4 seconds
+	if (std::getenv("DOSPAD_GAMEPAD_TEST")) {
+		const auto after = [](const int64_t seconds, void (^block)()) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, seconds * NSEC_PER_SEC),
+			               dispatch_get_main_queue(),
+			               block);
+		};
+		DBGamepadStick* const stick = _stick;
+		after(8, ^{
+			[stick moveTo:CGPointMake(0.7, -0.7)];
+			send_gamepad_action(GetGamepadButton(CurrentGameName(), 0), true);
+		});
+		after(12, ^{
+			[stick recentre];
+			send_gamepad_action(GetGamepadButton(CurrentGameName(), 0), false);
+		});
+	}
 
 	return self;
 }
@@ -932,26 +1338,37 @@ constexpr float ColonizationUnits = 6.0f;
 		[self restorePosition:_gameKeys];
 	}
 
-	const CGFloat toggle_right = bounds.size.width - safe.right - 12;
+	// The gamepad's stick and buttons sit in the bottom corners. The
+	// keyboard covers them, so they're hidden while it's open.
+	const auto gamepad_visible = _shows_gamepad && _keyboard.hidden;
+	if (!gamepad_visible && !_stick.hidden) {
+		[_stick recentre];
+		[_gamepadButtons releaseAll];
+	}
+	_stick.hidden          = !gamepad_visible;
+	_gamepadButtons.hidden = !gamepad_visible;
 
-	_keyboardToggle.frame = CGRectMake(toggle_right - ToggleWidth,
-	                                   safe.top + 12,
-	                                   ToggleWidth,
-	                                   ToggleHeight);
-	_numpadToggle.frame = CGRectMake(toggle_right - 2 * ToggleWidth - ToggleGap,
-	                                 safe.top + 12,
-	                                 ToggleWidth,
-	                                 ToggleHeight);
-	_gameKeysToggle.frame = CGRectMake(toggle_right - 3 * ToggleWidth - 2 * ToggleGap,
-	                                   safe.top + 12,
-	                                   ToggleWidth,
-	                                   ToggleHeight);
-	const auto pointer_slot = _gameKeysToggle.hidden ? 3 : 4;
-	_pointerToggle.frame = CGRectMake(toggle_right - pointer_slot * ToggleWidth -
-	                                          (pointer_slot - 1) * ToggleGap,
-	                                  safe.top + 12,
-	                                  ToggleWidth,
-	                                  ToggleHeight);
+	const CGFloat gamepad_size = std::min(bounds.size.height * 0.4, 190.0);
+	const CGFloat gamepad_top  = bounds.size.height - safe.bottom - 20 - gamepad_size;
+	_stick.frame = CGRectMake(safe.left + 20, gamepad_top, gamepad_size, gamepad_size);
+	_gamepadButtons.frame = CGRectMake(bounds.size.width - safe.right - 20 - gamepad_size,
+	                                   gamepad_top,
+	                                   gamepad_size,
+	                                   gamepad_size);
+
+	// The toggles, from the right
+	CGFloat toggle_left = bounds.size.width - safe.right - 12;
+	for (UIButton* toggle in @[_keyboardToggle,
+	                           _numpadToggle,
+	                           _gameKeysToggle,
+	                           _gamepadToggle,
+	                           _pointerToggle]) {
+		if (!toggle.hidden) {
+			toggle_left -= ToggleWidth;
+			toggle.frame = CGRectMake(toggle_left, safe.top + 12, ToggleWidth, ToggleHeight);
+			toggle_left -= ToggleGap;
+		}
+	}
 
 	// The menu (settings, restart, back to the library), away from the
 	// other toggles in the top-left corner
@@ -1065,13 +1482,53 @@ constexpr float ColonizationUnits = 6.0f;
 	if (_gameKeysToggle.hidden) {
 		_gameKeys.hidden = YES;
 	}
+
+	// Outside a game there's nowhere to keep it, so it stays as it was
+	if (game) {
+		_shows_gamepad = IsGamepadShown(game);
+	}
+	_stick.joystick = (GetGamepadStick(game) == GamepadStick::Joystick);
+
+	std::array<int, GamepadButtonCount> actions = {};
+	for (int button = 0; button < GamepadButtonCount; ++button) {
+		actions[button] = GetGamepadButton(game, button);
+	}
+	[_gamepadButtons setActions:actions];
+
+	// DOS sees a joystick only when the gamepad acts as one
+	const auto uses_joystick = _stick.joystick ||
+	                           std::any_of(actions.begin(), actions.end(), [](const int action) {
+		                           return action == JoystickButton1 ||
+		                                  action == JoystickButton2;
+	                           });
+	if (uses_joystick) {
+		JOYSTICK_Enable(0, true);
+	} else {
+		[self disableJoystick];
+	}
+	_enabled_joystick = uses_joystick;
+
 	[self setNeedsLayout];
+}
+
+// Turns off the emulated joystick if the gamepad turned it on, unless a
+// real controller is using it
+- (void)disableJoystick
+{
+	if (_enabled_joystick && joytype == JOY_NONE_FOUND) {
+		JOYSTICK_Enable(0, false);
+	}
+	_enabled_joystick = false;
 }
 
 // Stops the timer, which reads the emulated BIOS data area, before the
 // emulator shuts down
 - (void)shutDown
 {
+	[_stick recentre];
+	[_gamepadButtons releaseAll];
+	[self disableJoystick];
+
 	[_lock_keys_timer invalidate];
 	_lock_keys_timer = nil;
 	[NSNotificationCenter.defaultCenter removeObserver:self];
@@ -1177,6 +1634,15 @@ constexpr float ColonizationUnits = 6.0f;
 	[self setNeedsLayout];
 }
 
+- (void)toggleGamepad
+{
+	_shows_gamepad = !_shows_gamepad;
+	if (CurrentGameName()) {
+		SetGamepadShown(CurrentGameName(), _shows_gamepad);
+	}
+	[self setNeedsLayout];
+}
+
 - (void)toggleGameKeys
 {
 	_gameKeys.hidden = !_gameKeys.hidden;
@@ -1195,14 +1661,17 @@ constexpr float ColonizationUnits = 6.0f;
 	[self setNeedsLayout];
 }
 
-// The trackpad gestures ignore touches that land on the key panels or their
-// toggle buttons
+// The trackpad gestures ignore touches that land on the key panels, the
+// gamepad or the toggle buttons
 - (BOOL)gestureRecognizer:(UIGestureRecognizer*)recognizer
        shouldReceiveTouch:(UITouch*)touch
 {
 	return !([touch.view isDescendantOfView:_keyboard] ||
 	         [touch.view isDescendantOfView:_numpad] ||
 	         [touch.view isDescendantOfView:_gameKeys] ||
+	         [touch.view isDescendantOfView:_stick] ||
+	         [touch.view isDescendantOfView:_gamepadButtons] ||
+	         [touch.view isDescendantOfView:_gamepadToggle] ||
 	         [touch.view isDescendantOfView:_keyboardToggle] ||
 	         [touch.view isDescendantOfView:_numpadToggle] ||
 	         [touch.view isDescendantOfView:_gameKeysToggle] ||

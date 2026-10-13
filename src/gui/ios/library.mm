@@ -190,6 +190,13 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	    @"menu.\n\n",
 	    body);
 
+	add(@"Gamepad\n", heading);
+	add(@"In a game, the gamepad button (top right) shows a stick and four "
+	    @"buttons. The stick presses the arrow keys, or can be a joystick; "
+	    @"choose which, and the key each button presses, in the game's "
+	    @"settings.\n\n",
+	    body);
+
 	add(@"Music\n", heading);
 	add(@"Many games play music through a MIDI synthesiser. Put General MIDI "
 	    @"SoundFonts (.sf2 files) in the soundfonts folder, and Roland MT-32 "

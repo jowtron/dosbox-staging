@@ -6,6 +6,8 @@
 #include "gui/ios/game_import.h"
 #include "gui/ios/windows_display.h"
 
+#include <SDL3/SDL.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -24,6 +26,10 @@ NSString* const AppSettingsKey   = @"GameSettings";
 NSString* const DirectTouchKey   = @"DirectTouch";
 NSString* const GameKeysKey      = @"GameKeys";
 NSString* const NoGameKeys       = @"None";
+NSString* const GamepadStickKey   = @"GamepadStick";
+NSString* const JoystickStick     = @"Joystick";
+NSString* const GamepadShownKey   = @"GamepadShown";
+NSString* const GamepadButtonsKey = @"GamepadButtons";
 
 NSString* trimmed(NSString* text)
 {
@@ -248,6 +254,60 @@ UIButton* make_menu_button(UIMenu* menu)
 	return button;
 }
 
+// Without a choice, the bottom and right buttons are the joystick's buttons
+// when the stick is a joystick, and Ctrl and Alt otherwise (the fire buttons
+// of many keyboard games)
+int default_gamepad_button(const GamepadStick stick, const int button)
+{
+	const auto is_joystick = (stick == GamepadStick::Joystick);
+	switch (button) {
+	case 0: return is_joystick ? JoystickButton1 : SDL_SCANCODE_LCTRL;
+	case 1: return is_joystick ? JoystickButton2 : SDL_SCANCODE_LALT;
+	case 2: return SDL_SCANCODE_SPACE;
+	default: return SDL_SCANCODE_RETURN;
+	}
+}
+
+void set_gamepad_button(NSString* game, const int button, const int action)
+{
+	auto buttons = [app_settings(game)[GamepadButtonsKey] mutableCopy]
+	                       ?: [NSMutableDictionary dictionary];
+	buttons[@(button).stringValue] = @(action);
+	set_app_setting(game, GamepadButtonsKey, buttons);
+}
+
+// The keys a gamepad button can send, in the groups its menu shows them
+struct KeyGroup {
+	NSString* title = nil; // nil for a group shown in the menu itself
+	std::vector<int> actions = {};
+};
+
+std::vector<KeyGroup> gamepad_key_groups()
+{
+	const auto key_range = [](const SDL_Scancode first, const SDL_Scancode last) {
+		std::vector<int> keys = {};
+		for (int key = first; key <= last; ++key) {
+			keys.push_back(key);
+		}
+		return keys;
+	};
+	return {{nil, {JoystickButton1, JoystickButton2}},
+	        {nil,
+	         {SDL_SCANCODE_LCTRL,
+	          SDL_SCANCODE_LALT,
+	          SDL_SCANCODE_LSHIFT,
+	          SDL_SCANCODE_SPACE,
+	          SDL_SCANCODE_RETURN,
+	          SDL_SCANCODE_ESCAPE,
+	          SDL_SCANCODE_TAB,
+	          SDL_SCANCODE_BACKSPACE}},
+	        {@"Letters", key_range(SDL_SCANCODE_A, SDL_SCANCODE_Z)},
+	        {@"Numbers", key_range(SDL_SCANCODE_1, SDL_SCANCODE_0)},
+	        {@"Function keys", key_range(SDL_SCANCODE_F1, SDL_SCANCODE_F12)},
+	        {@"Arrow keys",
+	         {SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT}}};
+}
+
 } // namespace
 
 NSString* CurrentGameName()
@@ -291,6 +351,49 @@ NSString* GameKeysPanel(NSString* game)
 	return [game.lowercaseString containsString:@"coloni"] ? ColonizationKeys : nil;
 }
 
+GamepadStick GetGamepadStick(NSString* game)
+{
+	return [app_settings(game)[GamepadStickKey] isEqual:JoystickStick]
+	             ? GamepadStick::Joystick
+	             : GamepadStick::ArrowKeys;
+}
+
+bool IsGamepadShown(NSString* game)
+{
+	return [app_settings(game)[GamepadShownKey] boolValue];
+}
+
+void SetGamepadShown(NSString* game, const bool shown)
+{
+	set_app_setting(game, GamepadShownKey, @(shown));
+}
+
+int GetGamepadButton(NSString* game, const int button)
+{
+	if (NSNumber* action = app_settings(game)[GamepadButtonsKey][@(button).stringValue]) {
+		return action.intValue;
+	}
+	return default_gamepad_button(GetGamepadStick(game), button);
+}
+
+NSString* GamepadButtonLabel(const int action)
+{
+	switch (action) {
+	case JoystickButton1: return @"Fire 1";
+	case JoystickButton2: return @"Fire 2";
+	case SDL_SCANCODE_LCTRL: return @"Ctrl";
+	case SDL_SCANCODE_LALT: return @"Alt";
+	case SDL_SCANCODE_LSHIFT: return @"Shift";
+	case SDL_SCANCODE_RETURN: return @"Enter";
+	case SDL_SCANCODE_ESCAPE: return @"Esc";
+	case SDL_SCANCODE_UP: return @"↑";
+	case SDL_SCANCODE_DOWN: return @"↓";
+	case SDL_SCANCODE_LEFT: return @"←";
+	case SDL_SCANCODE_RIGHT: return @"→";
+	default: return @(SDL_GetScancodeName(static_cast<SDL_Scancode>(action)));
+	}
+}
+
 // Settings screen
 
 @interface DBGameSettingsViewController : UITableViewController <UITextFieldDelegate>
@@ -310,6 +413,10 @@ NSString* GameKeysPanel(NSString* game)
 // The Windows section has the screen size (only with VBESVGA.DRV), then the
 // display driver.
 enum Section { NameSection, EmulatorSection, WindowsSection, ControlsSection, SectionCount };
+
+// The Controls section ends with a row for each gamepad button
+enum ControlsRow { MouseRow, GameKeysRow, GamepadRow, FirstButtonRow };
+constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 
 - (instancetype)initWithGame:(NSString*)game
                     confPath:(NSString*)conf_path
@@ -339,6 +446,12 @@ enum Section { NameSection, EmulatorSection, WindowsSection, ControlsSection, Se
 		                             target:self
 		                             action:@selector(close)];
 	}
+
+	// A gamepad button's default follows the stick
+	[NSNotificationCenter.defaultCenter addObserver:self.tableView
+	                                       selector:@selector(reloadData)
+	                                           name:GameSettingsChangedNotification
+	                                         object:nil];
 }
 
 - (void)viewDidAppear:(BOOL)animated
@@ -369,7 +482,7 @@ enum Section { NameSection, EmulatorSection, WindowsSection, ControlsSection, Se
 	case EmulatorSection: return static_cast<NSInteger>(conf_settings().size()) + 1;
 	case WindowsSection:
 		return _windows_dir ? (UsesVbeSvga(_windows_dir) ? 2 : 1) : 0;
-	case ControlsSection: return 2;
+	case ControlsSection: return ControlsRowCount;
 	}
 	return 0;
 }
@@ -415,7 +528,11 @@ enum Section { NameSection, EmulatorSection, WindowsSection, ControlsSection, Se
 		                         CurrentGameName() ? @"\n\nQuit the game to install it." : @""];
 	case ControlsSection:
 		return @"Direct touch clicks where your finger is. Trackpad moves the "
-		       @"pointer like a laptop's trackpad, for games that need it.";
+		       @"pointer like a laptop's trackpad, for games that need it.\n\n"
+		       @"The gamepad button (top right) shows a stick and four buttons. "
+		       @"The stick presses the arrow keys, or works as a joystick; DOS "
+		       @"games look for a joystick when they start, so choose Joystick "
+		       @"before starting the game.";
 	}
 	return nil;
 }
@@ -475,9 +592,27 @@ enum Section { NameSection, EmulatorSection, WindowsSection, ControlsSection, Se
 		return cell;
 	}
 	case ControlsSection: {
-		content.text = (indexPath.row == 0) ? @"Mouse" : @"Game keys";
+		switch (indexPath.row) {
+		case MouseRow:
+			content.text       = @"Mouse";
+			cell.accessoryView = [self mouseMenu];
+			break;
+		case GameKeysRow:
+			content.text       = @"Game keys";
+			cell.accessoryView = [self gameKeysMenu];
+			break;
+		case GamepadRow:
+			content.text       = @"Gamepad stick";
+			cell.accessoryView = [self gamepadStickMenu];
+			break;
+		default: {
+			const auto button = static_cast<int>(indexPath.row - FirstButtonRow);
+			NSArray* const names = @[@"Bottom", @"Right", @"Left", @"Top"];
+			content.text = [NSString stringWithFormat:@"%@ button", names[button]];
+			cell.accessoryView = [self gamepadButtonMenu:button];
+		} break;
+		}
 		cell.contentConfiguration = content;
-		cell.accessoryView = (indexPath.row == 0) ? [self mouseMenu] : [self gameKeysMenu];
 		return cell;
 	}
 	}
@@ -697,6 +832,44 @@ enum Section { NameSection, EmulatorSection, WindowsSection, ControlsSection, Se
 	colonization.state = has_keys ? UIMenuElementStateOn : UIMenuElementStateOff;
 	none.state         = has_keys ? UIMenuElementStateOff : UIMenuElementStateOn;
 	return make_menu_button([UIMenu menuWithChildren:@[colonization, none]]);
+}
+
+- (UIButton*)gamepadStickMenu
+{
+	NSString* const game = _game;
+	const auto stick     = GetGamepadStick(game);
+
+	const auto choose = ^(NSString* value) {
+		return ^{
+			set_app_setting(game, GamepadStickKey, value);
+		};
+	};
+	return make_menu_button([UIMenu menuWithChildren:@[
+		make_action(@"Arrow keys", stick == GamepadStick::ArrowKeys, choose(@"ArrowKeys")),
+		make_action(@"Joystick", stick == GamepadStick::Joystick, choose(JoystickStick)),
+	]]);
+}
+
+- (UIButton*)gamepadButtonMenu:(int)button
+{
+	NSString* const game = _game;
+	const auto current   = GetGamepadButton(game, button);
+
+	auto items = [NSMutableArray<UIMenuElement*> array];
+	for (const auto& group : gamepad_key_groups()) {
+		auto actions = [NSMutableArray<UIMenuElement*> array];
+		for (const auto action : group.actions) {
+			[actions addObject:make_action(GamepadButtonLabel(action), action == current, ^{
+				         set_gamepad_button(game, button, action);
+			         })];
+		}
+		[items addObject:[UIMenu menuWithTitle:group.title ?: @""
+		                                 image:nil
+		                            identifier:nil
+		                               options:group.title ? 0 : UIMenuOptionsDisplayInline
+		                              children:actions]];
+	}
+	return make_menu_button([UIMenu menuWithChildren:items]);
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField*)field
