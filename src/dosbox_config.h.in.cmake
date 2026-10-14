@@ -77,6 +77,9 @@
 // Define to 1 to use opengl display output support
 #cmakedefine01 C_OPENGL
 
+// Define to 1 to enable the SDL_GPU render backend
+#cmakedefine01 C_SDL_GPU
+
 // Define to 1 to enable internal debugger (using ncurses or pdcurses)
 #cmakedefine01 C_DEBUGGER
 
