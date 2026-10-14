@@ -696,7 +696,8 @@ void RENDER_SetScanAndPixelDoubling()
 		force_no_pixel_doubling = flat_pixels_on;
 	} break;
 
-	case RenderBackendType::OpenGl: {
+	case RenderBackendType::OpenGl:
+	case RenderBackendType::SdlGpu: {
 		const auto shader_preset = GFX_GetRenderer()->GetCurrentShaderPreset();
 
 		force_vga_single_scan = shader_preset.settings.force_single_scan;
@@ -1529,7 +1530,8 @@ DosBox::Rect RENDER_CalcDrawRectInPixels(const DosBox::Rect& canvas_size_px,
 		// moire artifacts in 99% of cases, so it's very much
 		// worth it for better viewport utilisation.
 		//
-		if (GFX_GetRenderBackendType() != RenderBackendType::OpenGl) {
+		// No shader support in the SDL backend
+		if (GFX_GetRenderBackendType() == RenderBackendType::Sdl) {
 			return draw_size_fit_px;
 		}
 
@@ -1787,7 +1789,7 @@ static void init_render_settings(SectionProp& section)
 	        "full list of available shaders. You can also use an absolute or relative path to\n"
 	        "a file. In all cases, you may omit the shader's '.glsl' file extension.");
 	string_prop->SetEnabledOptions({
-#if C_OPENGL
+#if C_OPENGL || C_SDL_GPU
 	        "shader",
 #endif
 	});

@@ -213,6 +213,8 @@ bool OpenGlRenderer::InitRenderer()
 	// space
 	glDisable(GL_DEPTH_TEST);
 
+	ShaderManager::GetInstance().SetRenderBackend(RenderBackendType::OpenGl);
+
 	shader_pipeline = std::make_unique<ShaderPipeline>();
 
 	return true;

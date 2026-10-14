@@ -67,7 +67,9 @@ enum class PresentationMode {
 	HostRate
 };
 
-enum class RenderBackendType { OpenGl, Sdl };
+// Both the OpenGL and the SDL_GPU backends support shaders; the SDL backend
+// doesn't
+enum class RenderBackendType { OpenGl, SdlGpu, Sdl };
 
 RenderBackendType GFX_GetRenderBackendType();
 

@@ -64,6 +64,18 @@ bool ShaderDescriptor::EnforceAutoIntegerScaling() const
 	return shader_name.starts_with("crt/");
 }
 
+void ShaderManager::SetRenderBackend(const RenderBackendType backend_type)
+{
+	if (backend_type == render_backend_type) {
+		return;
+	}
+	render_backend_type = backend_type;
+
+	// The cached shaders might hold OpenGL programs of a destroyed context,
+	// or no programs at all
+	shader_cache.clear();
+}
+
 std::optional<Shader> ShaderManager::LoadShader(const std::string& shader_name)
 {
 	if (!shader_cache.contains(shader_name)) {
@@ -105,7 +117,10 @@ std::optional<std::pair<Shader, ShaderPreset>> ShaderManager::ForceReloadShader(
 		const auto& shader_key = descriptor.shader_name;
 		assert(shader_cache.contains(shader_key));
 
-		glDeleteProgram(shader_cache[shader_key].program_object);
+		if (const auto program = shader_cache[shader_key].program_object;
+		    program != 0) {
+			glDeleteProgram(program);
+		}
 		shader_cache[shader_key] = shader;
 	};
 
@@ -176,7 +191,10 @@ std::optional<Shader> ShaderManager::LoadAndBuildShader(const std::string& shade
 	               pragmas.output_size,
 	               pragmas.preset};
 
-	if (!shader.BuildShaderProgram(shader_source)) {
+	shader.source = shader_source;
+
+	if (render_backend_type == RenderBackendType::OpenGl &&
+	    !shader.BuildShaderProgram(shader_source)) {
 		LOG_ERR("RENDER: Error loading shader '%s'", shader_name.c_str());
 		return {};
 	}

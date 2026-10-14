@@ -16,6 +16,10 @@ struct Shader {
 	ShaderInfo info       = {};
 	GLuint program_object = 0;
 
+	// GLSL source of the shader (backends other than OpenGL compile it
+	// themselves)
+	std::string source = {};
+
 	/*
 	 * Build an OpenGL shader program.
 	 *

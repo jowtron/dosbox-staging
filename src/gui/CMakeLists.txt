@@ -25,6 +25,26 @@ target_sources(dosboxcommon PRIVATE
 )
 endif()
 
+if (C_SDL_GPU)
+  target_sources(dosboxcommon PRIVATE
+    render/gpu_shader_pipeline.cpp
+    render/gpu_shader_translator.cpp
+    render/sdl_gpu_renderer.cpp
+  )
+  if (APPLE)
+    target_sources(dosboxcommon PRIVATE render/metal_colorspace.mm)
+    target_link_libraries(dosboxcommon PRIVATE "-framework QuartzCore")
+  endif()
+  target_link_libraries(dosboxcommon PRIVATE
+    glslang::glslang
+    glslang::SPIRV
+    glslang::glslang-default-resource-limits
+    spirv-cross-core
+    spirv-cross-glsl
+    spirv-cross-msl
+  )
+endif()
+
 if (DOSBOX_PLATFORM_IOS)
   target_sources(dosboxcommon PRIVATE ios/touch_overlay.mm ios/library.mm ios/game_import.mm ios/game_settings.mm ios/windows_display.mm)
   # TARGET_DIRECTORY: the target is defined in another directory, where

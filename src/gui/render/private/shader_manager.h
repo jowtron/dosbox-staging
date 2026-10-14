@@ -32,6 +32,12 @@ public:
 
 	static void AddMessages();
 
+	// Set the render backend the shaders are loaded for. OpenGL shader
+	// programs are only built for the OpenGL backend; other backends
+	// compile the shader sources themselves. Changing the backend clears
+	// the shader cache.
+	void SetRenderBackend(const RenderBackendType backend_type);
+
 	std::optional<Shader> LoadShader(const std::string& shader_name);
 	std::optional<Shader> ForceReloadShader(const std::string& shader_name);
 
@@ -62,6 +68,8 @@ private:
 	std::optional<ShaderPreset> LoadShaderPreset(
 	        const ShaderDescriptor& descriptor,
 	        const ShaderPreset& default_preset) const;
+
+	RenderBackendType render_backend_type = RenderBackendType::OpenGl;
 
 	// Keys are the shader names including the path part but without the
 	// .glsl file extension

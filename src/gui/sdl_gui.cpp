@@ -31,6 +31,7 @@
 #include "gui/ios/touch_overlay.h"
 #endif
 #include "gui/render/opengl_renderer.h"
+#include "gui/render/sdl_gpu_renderer.h"
 #include "gui/render/sdl_renderer.h"
 #include "gui/titlebar.h"
 #include "hardware/input/keyboard.h"
@@ -332,6 +333,11 @@ static void configure_renderer()
 #if C_OPENGL
 	} else if (output == "opengl") {
 		sdl.render_backend_type = RenderBackendType::OpenGl;
+#endif
+
+#if C_SDL_GPU
+	} else if (output == "gpu") {
+		sdl.render_backend_type = RenderBackendType::SdlGpu;
 #endif
 
 	} else {
@@ -1680,6 +1686,35 @@ static SDL_WindowFlags get_sdl_window_flags()
 
 static RenderBackend* create_renderer()
 {
+#if C_SDL_GPU
+	if (sdl.render_backend_type == RenderBackendType::SdlGpu) {
+		try {
+			return new SdlGpuRenderer(sdl.windowed.x_pos,
+			                          sdl.windowed.y_pos,
+			                          sdl.windowed.width,
+			                          sdl.windowed.height,
+			                          get_sdl_window_flags());
+
+		} catch (const std::runtime_error& ex) {
+#if C_OPENGL
+			LOG_WARNING(
+			        "SDLGPU: Error initialising SDL_GPU renderer, "
+			        "falling back to OpenGL renderer");
+
+			sdl.render_backend_type = RenderBackendType::OpenGl;
+			set_section_property_value("sdl", "output", "opengl");
+#else
+			LOG_WARNING(
+			        "SDLGPU: Error initialising SDL_GPU renderer, "
+			        "falling back to SDL renderer");
+
+			sdl.render_backend_type = RenderBackendType::Sdl;
+			set_section_property_value("sdl", "output", "texture");
+#endif
+		}
+	}
+#endif
+
 #if C_OPENGL
 	if (sdl.render_backend_type == RenderBackendType::OpenGl) {
 		try {
@@ -2783,6 +2818,9 @@ static void init_sdl_config_settings(SectionProp& section)
 	pstring->SetOptionHelp("texturesharp",
 	                       "  texturesharp:  SDL's texture backend with sharp pixel-art scaling;\n"
 	                       "                 crisp pixels that stay even at non-integer scales.");
+	pstring->SetOptionHelp("gpu",
+	                       "  gpu:        SDL_GPU backend (Metal, Vulkan or Direct3D 12) with the\n"
+	                       "              same shader support as 'opengl'.");
 #if C_OPENGL
 	pstring->SetDeprecatedWithAlternateValue("surface", "opengl");
 	pstring->SetDeprecatedWithAlternateValue("openglpp", "opengl");
@@ -2796,6 +2834,9 @@ static void init_sdl_config_settings(SectionProp& section)
 #if C_OPENGL
 	        "opengl",
 #endif
+#if C_SDL_GPU
+	        "gpu",
+#endif
 	        "texture",
 	        "texturenb",
 	        "texturesharp",
@@ -2806,6 +2847,9 @@ static void init_sdl_config_settings(SectionProp& section)
 	        "opengl",
 #else
 	        "texture_default",
+#endif
+#if C_SDL_GPU
+	        "gpu",
 #endif
 	        "texture",
 	        "texturenb",

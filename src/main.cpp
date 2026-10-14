@@ -274,7 +274,7 @@ static int edit_primary_config()
 
 static void list_shaders()
 {
-#if C_OPENGL
+#if C_OPENGL || C_SDL_GPU
 	for (const auto& line : RENDER_GenerateShaderInventoryMessage()) {
 		printf("%s\n", line.c_str());
 	}
@@ -534,7 +534,7 @@ static void maybe_create_resource_directories()
 	const auto plugins_dir = get_config_dir() / PluginsDir;
 	try_create_resource_dir(plugins_dir);
 
-#if C_OPENGL
+#if C_OPENGL || C_SDL_GPU
 	const auto shaders_dir = get_config_dir() / ShadersDir;
 	try_create_resource_dir(shaders_dir);
 #endif
