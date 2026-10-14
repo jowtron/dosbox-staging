@@ -24,6 +24,7 @@
 #include "gui/common.h"
 #include "gui/mapper.h"
 #include "gui/private/common.h"
+#include "gui/render/sdl_gpu_renderer.h"
 #include "hardware/input/joystick.h"
 #include "hardware/input/keyboard.h"
 #include "hardware/input/mouse.h"
@@ -3058,6 +3059,13 @@ void MAPPER_DisplayUI() {
 	}
 	mapper.renderer = SDL_GetRenderer(mapper.window);
 
+#if C_SDL_GPU
+	auto gpu_renderer = dynamic_cast<SdlGpuRenderer*>(GFX_GetRenderer());
+	if (!mapper.renderer && gpu_renderer) {
+		mapper.renderer = gpu_renderer->CreateMapperRenderer();
+	}
+#endif
+
 #if C_OPENGL
 	SDL_GLContext context = nullptr;
 	if (!mapper.renderer) {
@@ -3189,6 +3197,12 @@ void MAPPER_DisplayUI() {
 	                       color_black.green,
 	                       color_black.blue,
 	                       SDL_ALPHA_OPAQUE);
+#if C_SDL_GPU
+	if (gpu_renderer) {
+		gpu_renderer->DestroyMapperRenderer(mapper.renderer);
+		mapper.renderer = nullptr;
+	}
+#endif
 #if C_OPENGL
 	if (context) {
 		if (!SDL_FlushRenderer(mapper.renderer)) {

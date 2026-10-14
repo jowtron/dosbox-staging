@@ -77,6 +77,11 @@ public:
 	uint32_t MakePixel(const uint8_t red, const uint8_t green,
 	                   const uint8_t blue) override;
 
+	// The graphical mapper draws with an SDL renderer; this hands the window
+	// over to one sharing our GPU device, and takes it back afterwards.
+	SDL_Renderer* CreateMapperRenderer();
+	void DestroyMapperRenderer(SDL_Renderer* renderer);
+
 	// prevent copying
 	SdlGpuRenderer(const SdlGpuRenderer&) = delete;
 	// prevent assignment

@@ -785,6 +785,36 @@ RenderedImage SdlGpuRenderer::ReadPixelsPostShader(const DosBox::Rect output_rec
 	return image;
 }
 
+SDL_Renderer* SdlGpuRenderer::CreateMapperRenderer()
+{
+	SDL_WaitForGPUIdle(device);
+	SDL_ReleaseWindowFromGPUDevice(device, window);
+
+	auto renderer = SDL_CreateGPURenderer(device, window);
+	if (!renderer) {
+		LOG_ERR("SDLGPU: Error creating renderer for the mapper: %s",
+		        SDL_GetError());
+
+		DestroyMapperRenderer(nullptr);
+	}
+	return renderer;
+}
+
+void SdlGpuRenderer::DestroyMapperRenderer(SDL_Renderer* renderer)
+{
+	if (renderer) {
+		// This releases the window from the GPU device
+		SDL_DestroyRenderer(renderer);
+	}
+
+	if (!SDL_ClaimWindowForGPUDevice(device, window)) {
+		LOG_ERR("SDLGPU: Error reclaiming window after the mapper: %s",
+		        SDL_GetError());
+		return;
+	}
+	SetSwapchainParameters(present_mode);
+}
+
 uint32_t SdlGpuRenderer::MakePixel(const uint8_t red, const uint8_t green,
                                    const uint8_t blue)
 {
