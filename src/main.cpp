@@ -649,9 +649,11 @@ static Uint32 SDLCALL end_restart_test_run(void*, SDL_TimerID, Uint32)
 // Test hook for comparing the render backends: with DOSBOX_CAPTURE_TEST_MS
 // set, a screenshot is taken that many milliseconds after the start (in the
 // formats set by 'default_image_capture_formats'), then DOSBox quits.
+static bool capture_test_screenshot_requested = false;
+
 static Uint32 SDLCALL capture_test(void*, SDL_TimerID, Uint32)
 {
-	static bool screenshot_requested = false;
+	auto& screenshot_requested = capture_test_screenshot_requested;
 
 	if (!screenshot_requested) {
 		screenshot_requested = true;
@@ -865,6 +867,9 @@ int main(int argc, char* argv[])
 
 			SDL_TimerID capture_test_timer = 0;
 			if (const auto ms = std::getenv("DOSBOX_CAPTURE_TEST_MS")) {
+				// Each run of an in-process restart takes a screenshot
+				capture_test_screenshot_requested = false;
+
 				capture_test_timer = SDL_AddTimer(
 				        static_cast<Uint32>(std::atoi(ms)),
 				        capture_test,
