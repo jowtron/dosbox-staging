@@ -23,6 +23,7 @@
 #include <windows.h>
 #endif
 
+#include "capture/capture.h"
 #include "config/config.h"
 #include "config/setup.h"
 #include "cpu/cpu.h"
@@ -645,6 +646,25 @@ static Uint32 SDLCALL end_restart_test_run(void*, SDL_TimerID, Uint32)
 }
 #endif
 
+// Test hook for comparing the render backends: with DOSBOX_CAPTURE_TEST_MS
+// set, a screenshot is taken that many milliseconds after the start (in the
+// formats set by 'default_image_capture_formats'), then DOSBox quits.
+static Uint32 SDLCALL capture_test(void*, SDL_TimerID, Uint32)
+{
+	static bool screenshot_requested = false;
+
+	if (!screenshot_requested) {
+		screenshot_requested = true;
+		CAPTURE_RequestGroupedScreenshot();
+
+		// Quit after giving the screenshot time to be written
+		constexpr Uint32 QuitDelayMs = 1500;
+		return QuitDelayMs;
+	}
+	DOSBOX_RequestShutdown();
+	return 0;
+}
+
 int main(int argc, char* argv[])
 {
 	// Ensure we perform SDL cleanup and restore console settings at exit
@@ -843,8 +863,20 @@ int main(int argc, char* argv[])
 			}
 #endif
 
+			SDL_TimerID capture_test_timer = 0;
+			if (const auto ms = std::getenv("DOSBOX_CAPTURE_TEST_MS")) {
+				capture_test_timer = SDL_AddTimer(
+				        static_cast<Uint32>(std::atoi(ms)),
+				        capture_test,
+				        nullptr);
+			}
+
 			// Start emulation
 			SHELL_InitAndRun();
+
+			if (capture_test_timer) {
+				SDL_RemoveTimer(capture_test_timer);
+			}
 
 			if (test_timer) {
 				SDL_RemoveTimer(test_timer);

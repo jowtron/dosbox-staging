@@ -547,6 +547,12 @@ static void handle_capture_grouped_screenshot_event(const bool pressed)
 	}
 }
 
+void CAPTURE_RequestGroupedScreenshot()
+{
+	constexpr auto Pressed = true;
+	handle_capture_grouped_screenshot_event(Pressed);
+}
+
 static void handle_capture_single_raw_screenshot_event(const bool pressed)
 {
 	// Ignore key-release events

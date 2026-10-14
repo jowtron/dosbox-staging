@@ -55,6 +55,10 @@ void CAPTURE_AddMidiData(const bool sysex, const size_t len, const uint8_t* data
 void CAPTURE_StartVideoCapture();
 void CAPTURE_StopVideoCapture();
 
+// Takes a screenshot in the default image capture formats, as the screenshot
+// hotkey does
+void CAPTURE_RequestGroupedScreenshot();
+
 bool CAPTURE_IsCapturingAudio();
 bool CAPTURE_IsCapturingImage();
 bool CAPTURE_IsCapturingPostRenderImage();
