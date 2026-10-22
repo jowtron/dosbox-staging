@@ -2019,7 +2019,7 @@ void GFX_InitSdl()
 		       SDL_GetError());
 	}
 
-#ifdef MACOSX
+#if defined(MACOSX) && !defined(DOSBOX_PLATFORM_IOS)
 	// Otherwise, macOS can restore stale window sizes when the user drags
 	// the window to another display
 	DisableWindowFrameRestoreOnDisplayChange();
