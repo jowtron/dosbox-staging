@@ -3,18 +3,25 @@
 
 #include "gui/ios/game_settings.h"
 
+#include "gui/ios/game_icons.h"
 #include "gui/ios/game_import.h"
+#include "gui/ios/library.h"
 #include "gui/ios/windows_display.h"
+
+#import <PhotosUI/PhotosUI.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
+#include <numeric>
+#include <optional>
 #include <vector>
 
 NSString* const GameSettingsChangedNotification = @"DBGameSettingsChanged";
-NSString* const ColonizationKeys                = @"Colonization";
 
 namespace {
 
@@ -26,6 +33,8 @@ NSString* const AppSettingsKey   = @"GameSettings";
 NSString* const DirectTouchKey   = @"DirectTouch";
 NSString* const GameKeysKey      = @"GameKeys";
 NSString* const NoGameKeys       = @"None";
+NSString* const CustomGameKeys   = @"Custom";
+NSString* const CustomGameKeysKey = @"CustomGameKeys";
 NSString* const GamepadStickKey   = @"GamepadStick";
 NSString* const JoystickStick     = @"Joystick";
 NSString* const GamepadShownKey   = @"GamepadShown";
@@ -111,6 +120,9 @@ NSString* rename_game(NSString* old_name, NSString* conf_path, NSString* new_nam
 		if (![files moveItemAtPath:conf_path toPath:new_conf_path error:error]) {
 			return nil;
 		}
+		[files moveItemAtPath:CustomIconPath(conf_path)
+		               toPath:CustomIconPath(new_conf_path)
+		                error:nil];
 	}
 
 	rename_app_settings(old_name, new_name);
@@ -188,6 +200,45 @@ bool has_mt32_roms()
 	return false;
 }
 
+// Shaders need the GPU output; without one, the screen is drawn with sharp
+// pixels
+NSString* const GpuOutput   = @"gpu";
+NSString* const SharpOutput = @"texturesharp";
+
+// The shaders in a folder and its subfolders, by the names Staging knows them
+// by: their paths without the extension, such as 'crt/vga-1080p'
+NSArray<NSString*>* find_shaders(NSString* folder)
+{
+	auto names = [NSMutableArray<NSString*> array];
+	for (NSString* path in [NSFileManager.defaultManager enumeratorAtPath:folder]) {
+		if ([path.pathExtension.lowercaseString isEqualToString:@"glsl"] &&
+		    ![path hasPrefix:@"_"]) {
+			[names addObject:path.stringByDeletingPathExtension];
+		}
+	}
+	return [names sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+}
+
+NSString* bundled_resource(NSString* name)
+{
+	return [[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"assets"]
+	        stringByAppendingPathComponent:name];
+}
+
+// The CRT shader's presets, such as 'vga-4k'
+NSArray<NSString*>* find_crt_presets()
+{
+	auto names = [NSMutableArray<NSString*> array];
+	for (NSString* item in [NSFileManager.defaultManager
+	             contentsOfDirectoryAtPath:bundled_resource(@"shader-presets/crt/crt-hyllian")
+	                                 error:nil]) {
+		if ([item.pathExtension isEqualToString:@"preset"]) {
+			[names addObject:item.stringByDeletingPathExtension];
+		}
+	}
+	return [names sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+}
+
 // A Windows screen size that fills the display. 1.5 pixels per point keeps
 // Windows' text readable: 1264x584 on an iPhone 14, 1920x1440 on a 12.9"
 // iPad Pro. Staging's custom VESA mode is at most 1920x1440, with the width
@@ -217,14 +268,36 @@ NSString* fit_screen_size()
 	                                  std::min(round_to_8(height * scale), static_cast<int>(MaxHeight))];
 }
 
+// A size's aspect ratio: the familiar form, such as 4:3, when there is one,
+// otherwise to two decimal places, such as 2.16:1
+NSString* aspect_ratio(NSString* size)
+{
+	const auto parts = [size.lowercaseString componentsSeparatedByString:@"x"];
+	if (parts.count != 2) {
+		return nil;
+	}
+	const auto width  = parts[0].intValue;
+	const auto height = parts[1].intValue;
+	if (width <= 0 || height <= 0) {
+		return nil;
+	}
+	const auto divisor = std::gcd(width, height);
+	if (width / divisor <= 21 && height / divisor <= 21) {
+		return [NSString stringWithFormat:@"%d:%d", width / divisor, height / divisor];
+	}
+	return [NSString stringWithFormat:@"%.2f:1", static_cast<double>(width) / height];
+}
+
 ConfSetting screen_size_setting()
 {
 	const auto fit   = fit_screen_size();
 	auto setting     = ConfSetting{@"Screen size", @"dosbox", @[@"vesa_custom_resolution"], {}};
-	setting.choices  = {{[NSString stringWithFormat:@"Fit the screen (%@)", fit], fit}};
+	setting.choices  = {{[NSString stringWithFormat:@"Fit the screen (%@, %@)", fit, aspect_ratio(fit)],
+	                     fit}};
 	for (NSString* size in @[@"640x480", @"800x600", @"1024x768", @"1280x960"]) {
 		if (![size isEqualToString:fit]) {
-			setting.choices.push_back({size, size});
+			setting.choices.push_back(
+			        {[NSString stringWithFormat:@"%@ (%@)", size, aspect_ratio(size)], size});
 		}
 	}
 	return setting;
@@ -276,13 +349,14 @@ void set_gamepad_button(NSString* game, const int button, const int action)
 	set_app_setting(game, GamepadButtonsKey, buttons);
 }
 
-// The keys a gamepad button can send, in the groups its menu shows them
+// The keys a gamepad button or a game key can send, in the groups their
+// menus show them
 struct KeyGroup {
 	NSString* title = nil; // nil for a group shown in the menu itself
 	std::vector<int> actions = {};
 };
 
-std::vector<KeyGroup> gamepad_key_groups()
+std::vector<KeyGroup> key_groups()
 {
 	const auto key_range = [](const SDL_Scancode first, const SDL_Scancode last) {
 		std::vector<int> keys = {};
@@ -291,8 +365,7 @@ std::vector<KeyGroup> gamepad_key_groups()
 		}
 		return keys;
 	};
-	return {{nil, {JoystickButton1, JoystickButton2}},
-	        {nil,
+	return {{nil,
 	         {SDL_SCANCODE_LCTRL,
 	          SDL_SCANCODE_LALT,
 	          SDL_SCANCODE_LSHIFT,
@@ -305,7 +378,110 @@ std::vector<KeyGroup> gamepad_key_groups()
 	        {@"Numbers", key_range(SDL_SCANCODE_1, SDL_SCANCODE_0)},
 	        {@"Function keys", key_range(SDL_SCANCODE_F1, SDL_SCANCODE_F12)},
 	        {@"Arrow keys",
-	         {SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT}}};
+	         {SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT}},
+	        {@"Other keys",
+	         {SDL_SCANCODE_HOME,         SDL_SCANCODE_END,          SDL_SCANCODE_PAGEUP,
+	          SDL_SCANCODE_PAGEDOWN,     SDL_SCANCODE_INSERT,       SDL_SCANCODE_DELETE,
+	          SDL_SCANCODE_MINUS,        SDL_SCANCODE_EQUALS,       SDL_SCANCODE_LEFTBRACKET,
+	          SDL_SCANCODE_RIGHTBRACKET, SDL_SCANCODE_BACKSLASH,    SDL_SCANCODE_SEMICOLON,
+	          SDL_SCANCODE_APOSTROPHE,   SDL_SCANCODE_GRAVE,        SDL_SCANCODE_COMMA,
+	          SDL_SCANCODE_PERIOD,       SDL_SCANCODE_SLASH}}};
+}
+
+std::vector<KeyGroup> gamepad_key_groups()
+{
+	auto groups = key_groups();
+	groups.insert(groups.begin(), {nil, {JoystickButton1, JoystickButton2}});
+	return groups;
+}
+
+// Ready-made sets of game keys. A game with 'match' in its name gets the set
+// until another is chosen.
+struct KeySet {
+	NSString* name            = nil;
+	NSString* match           = nil;
+	std::vector<GameKey> keys = {};
+};
+
+const std::vector<KeySet>& key_sets()
+{
+	static const std::vector<KeySet> sets = {
+	        // Sid Meier's Colonization. The unit order keys come from the
+	        // order table in the game's COLTEXT0.DLL.
+	        {@"Colonization",
+	         @"coloni",
+	         {{SDL_SCANCODE_B, 0, @"Build colony"},
+	          {SDL_SCANCODE_F, 0, @"Fortify"},
+	          {SDL_SCANCODE_S, 0, @"Sentry"},
+	          {SDL_SCANCODE_G, 0, @"Go to"},
+	          {SDL_SCANCODE_P, 0, @"Clear/plow"},
+	          {SDL_SCANCODE_R, 0, @"Road"},
+	          {SDL_SCANCODE_T, 0, @"Trade route"},
+	          {SDL_SCANCODE_L, 0, @"Live in village"},
+	          {SDL_SCANCODE_W, 0, @"Wait"},
+	          {SDL_SCANCODE_SPACE, 0, @"No orders"},
+	          {SDL_SCANCODE_RETURN},
+	          {SDL_SCANCODE_ESCAPE}}},
+
+	        // Sid Meier's CivNet, which has Civilization's orders. The
+	        // keys come from its help file, CIVHELP.HLP.
+	        {@"CivNet",
+	         @"civ",
+	         {{SDL_SCANCODE_B, 0, @"Found city"},
+	          {SDL_SCANCODE_R, 0, @"Road"},
+	          {SDL_SCANCODE_I, 0, @"Irrigate"},
+	          {SDL_SCANCODE_M, 0, @"Mine"},
+	          {SDL_SCANCODE_F, 0, @"Fortify"},
+	          {SDL_SCANCODE_S, 0, @"Sentry"},
+	          {SDL_SCANCODE_G, 0, @"Go to"},
+	          {SDL_SCANCODE_W, 0, @"Wait"},
+	          {SDL_SCANCODE_N, 0, @"No orders"},
+	          {SDL_SCANCODE_P, 0, @"Pillage"},
+	          {SDL_SCANCODE_H, 0, @"Home city"},
+	          {SDL_SCANCODE_U, 0, @"Unload"}}},
+	};
+	return sets;
+}
+
+// The name of the game's set of keys: a ready-made set's, 'Custom' or 'None'
+NSString* game_key_set(NSString* game)
+{
+	if (NSString* name = app_settings(game)[GameKeysKey]) {
+		return name;
+	}
+	for (const auto& set : key_sets()) {
+		if ([game.lowercaseString containsString:set.match]) {
+			return set.name;
+		}
+	}
+	return NoGameKeys;
+}
+
+std::vector<GameKey> custom_game_keys(NSString* game)
+{
+	std::vector<GameKey> keys = {};
+	for (NSDictionary* key in app_settings(game)[CustomGameKeysKey]) {
+		keys.push_back({[key[@"key"] intValue], [key[@"modifiers"] intValue], key[@"caption"]});
+	}
+	return keys;
+}
+
+// Changing the keys makes them the game's own, even if they started as a
+// ready-made set
+void set_custom_game_keys(NSString* game, const std::vector<GameKey>& keys)
+{
+	auto array = [NSMutableArray array];
+	for (const auto& key : keys) {
+		auto dict = [NSMutableDictionary dictionary];
+		dict[@"key"]       = @(key.scancode);
+		dict[@"modifiers"] = @(key.modifiers);
+		if (key.caption.length > 0) {
+			dict[@"caption"] = key.caption;
+		}
+		[array addObject:dict];
+	}
+	set_app_setting(game, CustomGameKeysKey, array);
+	set_app_setting(game, GameKeysKey, CustomGameKeys);
 }
 
 } // namespace
@@ -342,13 +518,34 @@ void SetDirectTouch(NSString* game, bool direct_touch)
 	set_app_setting(game, DirectTouchKey, @(direct_touch));
 }
 
-NSString* GameKeysPanel(NSString* game)
+std::vector<GameKey> GetGameKeys(NSString* game)
 {
-	if (NSString* panel = app_settings(game)[GameKeysKey]) {
-		return [panel isEqualToString:ColonizationKeys] ? ColonizationKeys : nil;
+	NSString* const name = game_key_set(game);
+	if ([name isEqualToString:CustomGameKeys]) {
+		return custom_game_keys(game);
 	}
-	// Until chosen, Colonization gets its keys
-	return [game.lowercaseString containsString:@"coloni"] ? ColonizationKeys : nil;
+	for (const auto& set : key_sets()) {
+		if ([name isEqualToString:set.name]) {
+			return set.keys;
+		}
+	}
+	return {};
+}
+
+NSString* GameKeyLabel(const GameKey& key)
+{
+	auto label = [NSMutableString string];
+	if (key.modifiers & GameKeyCtrl) {
+		[label appendString:@"Ctrl+"];
+	}
+	if (key.modifiers & GameKeyAlt) {
+		[label appendString:@"Alt+"];
+	}
+	if (key.modifiers & GameKeyShift) {
+		[label appendString:@"Shift+"];
+	}
+	[label appendString:GamepadButtonLabel(key.scancode)];
+	return label;
 }
 
 GamepadStick GetGamepadStick(NSString* game)
@@ -386,6 +583,10 @@ NSString* GamepadButtonLabel(const int action)
 	case SDL_SCANCODE_LSHIFT: return @"Shift";
 	case SDL_SCANCODE_RETURN: return @"Enter";
 	case SDL_SCANCODE_ESCAPE: return @"Esc";
+	case SDL_SCANCODE_PAGEUP: return @"PgUp";
+	case SDL_SCANCODE_PAGEDOWN: return @"PgDn";
+	case SDL_SCANCODE_INSERT: return @"Ins";
+	case SDL_SCANCODE_DELETE: return @"Del";
 	case SDL_SCANCODE_UP: return @"↑";
 	case SDL_SCANCODE_DOWN: return @"↓";
 	case SDL_SCANCODE_LEFT: return @"←";
@@ -394,9 +595,423 @@ NSString* GamepadButtonLabel(const int action)
 	}
 }
 
+// Edits one of a game's keys: which key, the keys held with it, and its label
+
+@interface DBGameKeyViewController : UITableViewController <UITextFieldDelegate>
+- (instancetype)initWithGame:(NSString*)game index:(size_t)index;
+@end
+
+@implementation DBGameKeyViewController {
+	NSString* _game;
+	size_t _index;
+}
+
+enum KeySection { KeyChoiceSection, ModifiersSection, CaptionSection, KeySectionCount };
+
+constexpr NSInteger CaptionFieldTag = 1;
+
+// The modifiers in the order their rows show them
+constexpr std::array<int, 3> ModifierFlags = {GameKeyCtrl, GameKeyAlt, GameKeyShift};
+
+- (instancetype)initWithGame:(NSString*)game index:(size_t)index
+{
+	self = [super initWithStyle:UITableViewStyleInsetGrouped];
+	if (self) {
+		_game  = game;
+		_index = index;
+	}
+	return self;
+}
+
+- (void)viewDidLoad
+{
+	[super viewDidLoad];
+	[self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:@"key"];
+	[self refresh];
+}
+
+- (void)viewWillDisappear:(BOOL)animated
+{
+	[super viewWillDisappear:animated];
+
+	// Saves the label being typed
+	[self.view endEditing:YES];
+}
+
+- (std::optional<GameKey>)key
+{
+	const auto keys = GetGameKeys(_game);
+	if (_index >= keys.size()) {
+		return {};
+	}
+	return keys[_index];
+}
+
+- (void)setKey:(const GameKey&)key
+{
+	auto keys = GetGameKeys(_game);
+	if (_index < keys.size()) {
+		keys[_index] = key;
+		set_custom_game_keys(_game, keys);
+	}
+	[self refresh];
+}
+
+- (void)refresh
+{
+	if (const auto key = [self key]) {
+		self.title = GameKeyLabel(*key);
+	}
+	[self.tableView reloadData];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView
+{
+	return KeySectionCount;
+}
+
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section
+{
+	switch (section) {
+	case KeyChoiceSection: return 1;
+	case ModifiersSection: return static_cast<NSInteger>(ModifierFlags.size());
+	case CaptionSection: return 1;
+	}
+	return 0;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section
+{
+	switch (section) {
+	case ModifiersSection: return @"Hold down with it";
+	case CaptionSection: return @"Label";
+	}
+	return nil;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section
+{
+	return (section == CaptionSection)
+	             ? @"Shown under the key, to say what it does. Keep it short."
+	             : nil;
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView
+        cellForRowAtIndexPath:(NSIndexPath*)indexPath
+{
+	auto cell = [tableView dequeueReusableCellWithIdentifier:@"key" forIndexPath:indexPath];
+	cell.selectionStyle = UITableViewCellSelectionStyleNone;
+	cell.accessoryView  = nil;
+	[[cell.contentView viewWithTag:CaptionFieldTag] removeFromSuperview];
+
+	const auto key = [self key].value_or(GameKey{});
+	auto content   = cell.defaultContentConfiguration;
+
+	switch (indexPath.section) {
+	case KeyChoiceSection:
+		content.text       = @"Key";
+		cell.accessoryView = [self keyMenu:key];
+		break;
+	case ModifiersSection: {
+		const auto flag = ModifierFlags[static_cast<size_t>(indexPath.row)];
+		content.text    = @[@"Ctrl", @"Alt", @"Shift"][indexPath.row];
+
+		auto toggle = [[UISwitch alloc] init];
+		toggle.on   = (key.modifiers & flag) != 0;
+		toggle.tag  = flag;
+		[toggle addTarget:self
+		              action:@selector(modifierChanged:)
+		    forControlEvents:UIControlEventValueChanged];
+		cell.accessoryView = toggle;
+	} break;
+	case CaptionSection: {
+		cell.contentConfiguration = nil;
+		auto field = [[UITextField alloc] initWithFrame:CGRectInset(cell.contentView.bounds, 20, 0)];
+		field.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+		field.text             = key.caption;
+		field.placeholder      = @"What it does, such as Fortify";
+		field.returnKeyType    = UIReturnKeyDone;
+		field.clearButtonMode  = UITextFieldViewModeWhileEditing;
+		field.delegate         = self;
+		field.tag              = CaptionFieldTag;
+		[cell.contentView addSubview:field];
+		return cell;
+	}
+	}
+	cell.contentConfiguration = content;
+	return cell;
+}
+
+- (UIButton*)keyMenu:(const GameKey&)key
+{
+	__weak DBGameKeyViewController* weak_self = self;
+
+	auto items = [NSMutableArray<UIMenuElement*> array];
+	for (const auto& group : key_groups()) {
+		auto actions = [NSMutableArray<UIMenuElement*> array];
+		for (const auto scancode : group.actions) {
+			auto new_key     = key;
+			new_key.scancode = scancode;
+			[actions addObject:make_action(GamepadButtonLabel(scancode),
+			                               scancode == key.scancode,
+			                               ^{
+				                               [weak_self setKey:new_key];
+			                               })];
+		}
+		[items addObject:[UIMenu menuWithTitle:group.title ?: @""
+		                                 image:nil
+		                            identifier:nil
+		                               options:group.title ? 0 : UIMenuOptionsDisplayInline
+		                              children:actions]];
+	}
+	return make_menu_button([UIMenu menuWithChildren:items]);
+}
+
+- (void)modifierChanged:(UISwitch*)toggle
+{
+	if (auto key = [self key]) {
+		key->modifiers = toggle.on ? (key->modifiers | static_cast<int>(toggle.tag))
+		                           : (key->modifiers & ~static_cast<int>(toggle.tag));
+		[self setKey:*key];
+	}
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField*)field
+{
+	[field resignFirstResponder];
+	return YES;
+}
+
+- (void)textFieldDidEndEditing:(UITextField*)field
+{
+	auto key = [self key];
+	if (key && ![trimmed(field.text) isEqualToString:key->caption ?: @""]) {
+		key->caption = trimmed(field.text);
+		[self setKey:*key];
+	}
+}
+
+@end
+
+// The game's keys: a ready-made set, or keys of its own, which can be added,
+// changed, moved and removed
+
+@interface DBGameKeysViewController : UITableViewController
+- (instancetype)initWithGame:(NSString*)game;
+@end
+
+@implementation DBGameKeysViewController {
+	NSString* _game;
+}
+
+enum KeysSection { KeySetSection, KeyListSection, KeysSectionCount };
+
+- (instancetype)initWithGame:(NSString*)game
+{
+	self = [super initWithStyle:UITableViewStyleInsetGrouped];
+	if (self) {
+		_game      = game;
+		self.title = @"Game Keys";
+	}
+	return self;
+}
+
+- (void)viewDidLoad
+{
+	[super viewDidLoad];
+	[self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:@"keys"];
+	self.navigationItem.rightBarButtonItem = self.editButtonItem;
+}
+
+- (void)viewWillAppear:(BOOL)animated
+{
+	[super viewWillAppear:animated];
+	[self.tableView reloadData];
+}
+
+- (bool)hasKeys
+{
+	return ![game_key_set(_game) isEqualToString:NoGameKeys];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView
+{
+	return KeysSectionCount;
+}
+
+// The keys, then a row to add one
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section
+{
+	if (section == KeySetSection) {
+		return 1;
+	}
+	return [self hasKeys] ? static_cast<NSInteger>(GetGameKeys(_game).size()) + 1 : 0;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section
+{
+	if (section == KeySetSection) {
+		return @"In the game, the Game button shows these keys. Drag the panel "
+		       @"with two fingers to move it.";
+	}
+	return [self hasKeys] ? @"Changing a ready-made set makes a copy for this game." : nil;
+}
+
+- (bool)isKeyRow:(NSIndexPath*)indexPath
+{
+	return indexPath.section == KeyListSection &&
+	       static_cast<size_t>(indexPath.row) < GetGameKeys(_game).size();
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView
+        cellForRowAtIndexPath:(NSIndexPath*)indexPath
+{
+	auto cell = [tableView dequeueReusableCellWithIdentifier:@"keys" forIndexPath:indexPath];
+	cell.accessoryView  = nil;
+	cell.accessoryType  = UITableViewCellAccessoryNone;
+	cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+
+	if (indexPath.section == KeySetSection) {
+		auto content              = cell.defaultContentConfiguration;
+		content.text              = @"Keys";
+		cell.contentConfiguration = content;
+		cell.accessoryView        = [self keySetMenu];
+		cell.selectionStyle       = UITableViewCellSelectionStyleNone;
+		return cell;
+	}
+	if (![self isKeyRow:indexPath]) {
+		auto content              = cell.defaultContentConfiguration;
+		content.text              = @"Add Key";
+		content.textProperties.color = self.view.tintColor;
+		cell.contentConfiguration = content;
+		return cell;
+	}
+	const auto key = GetGameKeys(_game)[static_cast<size_t>(indexPath.row)];
+
+	auto content              = UIListContentConfiguration.valueCellConfiguration;
+	content.text              = GameKeyLabel(key);
+	content.secondaryText     = key.caption;
+	cell.contentConfiguration = content;
+	cell.accessoryType        = UITableViewCellAccessoryDisclosureIndicator;
+	return cell;
+}
+
+- (UIButton*)keySetMenu
+{
+	NSString* const game    = _game;
+	NSString* const current = game_key_set(game);
+
+	__weak DBGameKeysViewController* weak_self = self;
+	const auto choose = ^(void (^change)()) {
+		return ^{
+			change();
+			[weak_self.tableView reloadData];
+		};
+	};
+
+	auto actions = [NSMutableArray<UIMenuElement*> array];
+	[actions addObject:make_action(@"None", [current isEqualToString:NoGameKeys], choose(^{
+		         set_app_setting(game, GameKeysKey, NoGameKeys);
+	         }))];
+	for (const auto& set : key_sets()) {
+		NSString* const name = set.name;
+		[actions addObject:make_action(name, [current isEqualToString:name], choose(^{
+			         set_app_setting(game, GameKeysKey, name);
+		         }))];
+	}
+	// Starts from the keys shown now, unless the game has keys of its own
+	[actions addObject:make_action(@"Custom", [current isEqualToString:CustomGameKeys], choose(^{
+		         if (custom_game_keys(game).empty()) {
+			         set_custom_game_keys(game, GetGameKeys(game));
+		         } else {
+			         set_app_setting(game, GameKeysKey, CustomGameKeys);
+		         }
+	         }))];
+	return make_menu_button([UIMenu menuWithChildren:actions]);
+}
+
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)indexPath
+{
+	[tableView deselectRowAtIndexPath:indexPath animated:YES];
+	if (indexPath.section != KeyListSection) {
+		return;
+	}
+	auto keys = GetGameKeys(_game);
+	if (![self isKeyRow:indexPath]) {
+		keys.push_back({SDL_SCANCODE_A});
+		set_custom_game_keys(_game, keys);
+	}
+	const auto index = [self isKeyRow:indexPath] ? static_cast<size_t>(indexPath.row)
+	                                             : keys.size() - 1;
+	[self.navigationController
+	        pushViewController:[[DBGameKeyViewController alloc] initWithGame:_game index:index]
+	                  animated:YES];
+}
+
+- (BOOL)tableView:(UITableView*)tableView canEditRowAtIndexPath:(NSIndexPath*)indexPath
+{
+	return [self isKeyRow:indexPath];
+}
+
+- (BOOL)tableView:(UITableView*)tableView canMoveRowAtIndexPath:(NSIndexPath*)indexPath
+{
+	return [self isKeyRow:indexPath];
+}
+
+- (void)tableView:(UITableView*)tableView
+        commitEditingStyle:(UITableViewCellEditingStyle)style
+         forRowAtIndexPath:(NSIndexPath*)indexPath
+{
+	if (style != UITableViewCellEditingStyleDelete) {
+		return;
+	}
+	auto keys = GetGameKeys(_game);
+	keys.erase(keys.begin() + indexPath.row);
+	set_custom_game_keys(_game, keys);
+
+	[tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];
+	[tableView reloadSections:[NSIndexSet indexSetWithIndex:KeySetSection]
+	         withRowAnimation:UITableViewRowAnimationNone];
+}
+
+// Keys stay above the Add Key row
+- (NSIndexPath*)tableView:(UITableView*)tableView
+        targetIndexPathForMoveFromRowAtIndexPath:(NSIndexPath*)source
+                             toProposedIndexPath:(NSIndexPath*)proposed
+{
+	const auto last_key = static_cast<NSInteger>(GetGameKeys(_game).size()) - 1;
+	if (proposed.section != KeyListSection) {
+		return [NSIndexPath indexPathForRow:(proposed.section < KeyListSection ? 0 : last_key)
+		                          inSection:KeyListSection];
+	}
+	return [NSIndexPath indexPathForRow:std::min(proposed.row, last_key) inSection:KeyListSection];
+}
+
+- (void)tableView:(UITableView*)tableView
+        moveRowAtIndexPath:(NSIndexPath*)source
+               toIndexPath:(NSIndexPath*)destination
+{
+	auto keys      = GetGameKeys(_game);
+	const auto key = keys[static_cast<size_t>(source.row)];
+	keys.erase(keys.begin() + source.row);
+	keys.insert(keys.begin() + destination.row, key);
+	set_custom_game_keys(_game, keys);
+
+	// The set's name changes to Custom; after the move has finished
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[tableView reloadSections:[NSIndexSet indexSetWithIndex:KeySetSection]
+		         withRowAnimation:UITableViewRowAnimationNone];
+	});
+}
+
+@end
+
 // Settings screen
 
-@interface DBGameSettingsViewController : UITableViewController <UITextFieldDelegate>
+@interface DBGameSettingsViewController
+        : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate,
+                            PHPickerViewControllerDelegate, UIDocumentPickerDelegate>
+@property(nonatomic, readonly) UITableView* tableView;
 @end
 
 @implementation DBGameSettingsViewController {
@@ -407,37 +1022,147 @@ NSString* GamepadButtonLabel(const int action)
 	// The game's Windows, if it's a Windows game
 	NSString* _windows_dir;
 	bool _is_installing;
+
+	// On a wide screen, the touch controls are in a second column
+	UITableView* _right_table;
+	bool _is_wide;
+
+	// Settings in the game's config only take effect when it restarts
+	bool _needs_restart;
 }
 
-// The Emulator section has the settings in 'conf_settings()', then music.
+// The Emulator section has the settings in 'conf_settings()', then the
+// shader and music. Without a game, the screen edits the shared dosbox.conf
+// and has only that section.
 // The Windows section has the screen size (only with VBESVGA.DRV), then the
 // display driver.
 enum Section { NameSection, EmulatorSection, WindowsSection, ControlsSection, SectionCount };
+
+enum NameRow { NameFieldRow, IconRow, NameRowCount };
+enum EmulatorExtraRow { ShaderRow, MusicRow, EmulatorExtraRowCount };
+constexpr NSInteger NameFieldTag = 1;
 
 // The Controls section ends with a row for each gamepad button
 enum ControlsRow { MouseRow, GameKeysRow, GamepadRow, FirstButtonRow };
 constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 
+// The narrowest screen that has room for two columns, in points
+constexpr CGFloat TwoColumnWidth = 700;
+
 - (instancetype)initWithGame:(NSString*)game
                     confPath:(NSString*)conf_path
                     onRename:(void (^)(NSString*))on_rename
 {
-	self = [super initWithStyle:UITableViewStyleInsetGrouped];
+	self = [super initWithNibName:nil bundle:nil];
 	if (self) {
 		_game      = game;
 		_conf_path = conf_path;
 		_on_rename = on_rename;
-		self.title = @"Game Settings";
+		self.title = game ? @"Game Settings" : @"Settings";
 
-		_windows_dir = FindGameWindows(conf_path);
+		_windows_dir = game ? FindGameWindows(conf_path) : nil;
 	}
 	return self;
+}
+
+- (void)loadView
+{
+	self.view = [[UIView alloc] init];
+	self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
+
+	_tableView   = [self makeTable];
+	_right_table = [self makeTable];
+	_right_table.hidden = YES;
+}
+
+- (UITableView*)makeTable
+{
+	auto table = [[UITableView alloc] initWithFrame:CGRectZero
+	                                          style:UITableViewStyleInsetGrouped];
+	table.dataSource = self;
+	table.delegate   = self;
+	[table registerClass:UITableViewCell.class forCellReuseIdentifier:@"setting"];
+	[self.view addSubview:table];
+	return table;
+}
+
+- (void)viewDidLayoutSubviews
+{
+	[super viewDidLayoutSubviews];
+
+	const auto bounds  = self.view.bounds;
+	const auto is_wide = _game && bounds.size.width >= TwoColumnWidth;
+	if (is_wide) {
+		CGRect left = {}, right = {};
+		CGRectDivide(bounds, &left, &right, std::round(bounds.size.width / 2), CGRectMinXEdge);
+		_tableView.frame   = left;
+		_right_table.frame = right;
+	} else {
+		_tableView.frame = bounds;
+	}
+	if (is_wide != _is_wide) {
+		_is_wide            = is_wide;
+		_right_table.hidden = !is_wide;
+		[self reloadTables];
+	}
+}
+
+- (void)reloadTables
+{
+	[_tableView reloadData];
+	[_right_table reloadData];
+}
+
+// The section a table's section index shows: on a wide screen, the right
+// table has only the touch controls
+- (NSInteger)section:(UITableView*)table index:(NSInteger)index
+{
+	return (table == _right_table) ? ControlsSection : index;
+}
+
+- (bool)isRunning
+{
+	return _game && [CurrentGameName() isEqualToString:_game];
+}
+
+// Changes to the game's config take effect when it restarts, so in a game
+// they bring a button to restart it
+- (void)confChanged
+{
+	if (![self isRunning] || _needs_restart) {
+		return;
+	}
+	_needs_restart = true;
+	self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
+	        initWithTitle:@"Restart Game"
+	                style:UIBarButtonItemStylePlain
+	               target:self
+	               action:@selector(confirmRestart)];
+	[self reloadTables];
+}
+
+- (void)confirmRestart
+{
+	auto alert = [UIAlertController
+	        alertControllerWithTitle:@"Restart the game?"
+	                         message:@"Anything not saved in the game will be lost."
+	                  preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+	                                          style:UIAlertActionStyleCancel
+	                                        handler:nil]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Restart"
+	                                          style:UIAlertActionStyleDestructive
+	                                        handler:^(UIAlertAction*) {
+		                                        [self dismissViewControllerAnimated:YES
+		                                                                 completion:nil];
+		                                        IOS_RestartGame();
+	                                        }]];
+	[self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)viewDidLoad
 {
 	[super viewDidLoad];
-	[self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:@"setting"];
 
 	// Shown on its own over a game, it needs a way to close
 	if (self.navigationController.viewControllers.firstObject == self) {
@@ -448,8 +1173,8 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 	}
 
 	// A gamepad button's default follows the stick
-	[NSNotificationCenter.defaultCenter addObserver:self.tableView
-	                                       selector:@selector(reloadData)
+	[NSNotificationCenter.defaultCenter addObserver:self
+	                                       selector:@selector(reloadTables)
 	                                           name:GameSettingsChangedNotification
 	                                         object:nil];
 }
@@ -462,6 +1187,22 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 	if (const auto points = std::getenv("DOSPAD_SETTINGS_SCROLL")) {
 		[self.tableView setContentOffset:CGPointMake(0, std::atof(points)) animated:NO];
 	}
+
+	// Test hook: open the game keys, and with a number, that key's screen
+	static bool has_opened_keys = false;
+	if (const auto key = std::getenv("DOSPAD_SETTINGS_KEYS"); key && _game && !has_opened_keys) {
+		has_opened_keys = true;
+		[self.navigationController
+		        pushViewController:[[DBGameKeysViewController alloc] initWithGame:_game]
+		                  animated:NO];
+		if (const auto index = std::atoi(key); index > 0) {
+			[self.navigationController
+			        pushViewController:[[DBGameKeyViewController alloc]
+			                                   initWithGame:_game
+			                                          index:static_cast<size_t>(index - 1)]
+			                  animated:NO];
+		}
+	}
 }
 
 - (void)close
@@ -472,44 +1213,71 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView
 {
-	return SectionCount;
+	if (tableView == _right_table) {
+		return 1;
+	}
+	return _is_wide ? ControlsSection : SectionCount;
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section
 {
-	switch (section) {
-	case NameSection: return 1;
-	case EmulatorSection: return static_cast<NSInteger>(conf_settings().size()) + 1;
+	switch ([self section:tableView index:section]) {
+	case NameSection: return _game ? NameRowCount : 0;
+	case EmulatorSection:
+		return static_cast<NSInteger>(conf_settings().size()) + EmulatorExtraRowCount;
 	case WindowsSection:
 		return _windows_dir ? (UsesVbeSvga(_windows_dir) ? 2 : 1) : 0;
-	case ControlsSection: return ControlsRowCount;
+	case ControlsSection: return _game ? ControlsRowCount : 0;
 	}
 	return 0;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section
 {
-	switch (section) {
-	case NameSection: return @"Name";
-	case EmulatorSection: return @"Emulator";
+	switch ([self section:tableView index:section]) {
+	case NameSection: return _game ? @"Name and icon" : nil;
+	case EmulatorSection: return _game ? @"Emulator" : @"Emulator, for every game";
 	case WindowsSection: return _windows_dir ? @"Windows" : nil;
-	case ControlsSection: return @"Touch controls";
+	case ControlsSection: return _game ? @"Touch controls" : nil;
 	}
 	return nil;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section
 {
-	switch (section) {
+	switch ([self section:tableView index:section]) {
 	case NameSection:
-		return _on_rename ? nil : @"The name can be changed from the library.";
+		if (!_game) {
+			return nil;
+		}
+		return [NSString stringWithFormat:@"%@Windows games show their program's icon. "
+		                                  @"DOS programs have none: choose a picture "
+		                                  @"from Photos, or an .ico file from Files.",
+		                                  _on_rename ? @""
+		                                             : @"The name can be changed from "
+		                                               @"the library.\n\n"];
 	case EmulatorSection:
 		return [NSString stringWithFormat:
-		                         @"These take effect the next time the game starts. "
-		                         @"Default uses the shared dosbox.conf.\n\n"
+		                         @"%@\n\n"
+		                         @"Shaders draw the screen like an old monitor, with "
+		                         @"scanlines and glow; Auto CRT picks the look that "
+		                         @"suits each video mode. Your own shaders (.glsl) go in "
+		                         @"the shaders folder.\n\n"
 		                         @"For music, put SoundFonts (.sf2) in the soundfonts "
-		                         @"folder and MT-32 ROMs in the mt32-roms folder, in "
-		                         @"Files › On My %@ › DOSBox Staging.",
+		                         @"folder and MT-32 ROMs in the mt32-roms folder.\n\n"
+		                         @"These folders are in Files › On My %@ › DOSBox Staging.",
+		                         !_game ? @"Each game uses these unless its own settings "
+		                                  @"choose otherwise. They take effect the next time "
+		                                  @"a game starts."
+		                         : [self isRunning]
+		                                 ? @"Changes here and under Windows take effect when "
+		                                   @"the game restarts: tap Restart Game once you've "
+		                                   @"made them, or quit and start it again. Default "
+		                                   @"uses the settings for every game, in the "
+		                                   @"library's ⚙ button."
+		                                 : @"These take effect the next time the game starts. "
+		                                   @"Default uses the settings for every game, in the "
+		                                   @"library's ⚙ button.",
 		                         UIDevice.currentDevice.model];
 	case WindowsSection:
 		if (!_windows_dir) {
@@ -527,6 +1295,9 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 		                         @"downloads it from github.com/PluMGMK/vbesvga.drv.%@",
 		                         CurrentGameName() ? @"\n\nQuit the game to install it." : @""];
 	case ControlsSection:
+		if (!_game) {
+			return nil;
+		}
 		return @"Direct touch clicks where your finger is. Trackpad moves the "
 		       @"pointer like a laptop's trackpad, for games that need it.\n\n"
 		       @"The gamepad button (top right) shows a stick and four buttons. "
@@ -544,13 +1315,24 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 	                                            forIndexPath:indexPath];
 	cell.selectionStyle = UITableViewCellSelectionStyleNone;
 	cell.accessoryView  = nil;
-	for (UIView* view in cell.contentView.subviews) {
-		[view removeFromSuperview];
-	}
+	cell.accessoryType  = UITableViewCellAccessoryNone;
+	// Only the name's row has a field of its own. Removing the content
+	// view's other subviews would take a reused row's label with them.
+	[[cell.contentView viewWithTag:NameFieldTag] removeFromSuperview];
 	auto content = cell.defaultContentConfiguration;
 
-	switch (indexPath.section) {
+	switch ([self section:tableView index:indexPath.section]) {
 	case NameSection: {
+		if (indexPath.row == IconRow) {
+			content.text  = @"Icon";
+			content.image = GameIcon(_conf_path)
+			                     ?: [UIImage systemImageNamed:@"play.rectangle"];
+			content.imageProperties.reservedLayoutSize = CGSizeMake(GameIconSize,
+			                                                        GameIconSize);
+			cell.contentConfiguration = content;
+			cell.accessoryView        = [self iconMenu];
+			return cell;
+		}
 		cell.contentConfiguration = nil;
 		auto field = [[UITextField alloc] initWithFrame:CGRectInset(cell.contentView.bounds, 20, 0)];
 		field.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -561,12 +1343,19 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 		field.clearButtonMode    = UITextFieldViewModeWhileEditing;
 		field.autocorrectionType = UITextAutocorrectionTypeNo;
 		field.delegate           = self;
+		field.tag                = NameFieldTag;
 		[cell.contentView addSubview:field];
 		return cell;
 	}
 	case EmulatorSection: {
 		const auto row = static_cast<size_t>(indexPath.row);
-		if (row == conf_settings().size()) {
+		if (row == conf_settings().size() + ShaderRow) {
+			content.text              = @"Shader";
+			cell.contentConfiguration = content;
+			cell.accessoryView        = [self shaderMenu];
+			return cell;
+		}
+		if (row == conf_settings().size() + MusicRow) {
 			content.text              = @"Music";
 			cell.contentConfiguration = content;
 			cell.accessoryView        = [self musicMenu];
@@ -597,10 +1386,14 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 			content.text       = @"Mouse";
 			cell.accessoryView = [self mouseMenu];
 			break;
-		case GameKeysRow:
-			content.text       = @"Game keys";
-			cell.accessoryView = [self gameKeysMenu];
-			break;
+		case GameKeysRow: {
+			NSString* const set = game_key_set(_game);
+			content = UIListContentConfiguration.valueCellConfiguration;
+			content.text          = @"Game keys";
+			content.secondaryText = [set isEqualToString:CustomGameKeys] ? @"Own keys" : set;
+			cell.accessoryType    = UITableViewCellAccessoryDisclosureIndicator;
+			cell.selectionStyle   = UITableViewCellSelectionStyleDefault;
+		} break;
 		case GamepadRow:
 			content.text       = @"Gamepad stick";
 			cell.accessoryView = [self gamepadStickMenu];
@@ -631,7 +1424,11 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 		return [c.value isEqualToString:current];
 	});
 	if (current && !is_known) {
-		choices.push_back({current, current});
+		const auto ratio = [setting.keys.firstObject isEqualToString:@"vesa_custom_resolution"]
+		                         ? aspect_ratio(current)
+		                         : nil;
+		choices.push_back(
+		        {ratio ? [NSString stringWithFormat:@"%@ (%@)", current, ratio] : current, current});
 	}
 
 	auto actions = [NSMutableArray<UIMenuElement*> array];
@@ -640,6 +1437,7 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 		NSArray<NSString*>* keys   = setting.keys;
 		NSString* const value      = choice.value;
 		NSString* const conf_path  = _conf_path;
+		__weak DBGameSettingsViewController* weak_self = self;
 
 		auto action = [UIAction actionWithTitle:choice.title
 		                                  image:nil
@@ -648,6 +1446,7 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 			                                for (NSString* key in keys) {
 				                                WriteConfValue(conf_path, section, key, value);
 			                                }
+			                                [weak_self confChanged];
 		                                }];
 		const auto is_current = (value == nil) ? (current == nil)
 		                                       : [value isEqualToString:current];
@@ -657,16 +1456,104 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 	return make_menu_button([UIMenu menuWithChildren:actions]);
 }
 
+- (UIButton*)shaderMenu
+{
+	NSString* const conf_path = _conf_path;
+	NSString* const output    = ReadConfValue(conf_path, @"sdl", @"output").lowercaseString;
+	NSString* const shader    = ReadConfValue(conf_path, @"render", @"shader");
+	const auto is_sharp       = [output isEqualToString:SharpOutput];
+
+	__weak DBGameSettingsViewController* weak_self = self;
+
+	const auto choose = ^(NSString* new_output, NSString* new_shader) {
+		return ^{
+			WriteConfValue(conf_path, @"sdl", @"output", new_output);
+			WriteConfValue(conf_path, @"render", @"shader", new_shader);
+			[weak_self confChanged];
+		};
+	};
+	const auto shader_action = ^(NSString* title, NSString* name) {
+		return make_action(title,
+		                   !is_sharp && [shader caseInsensitiveCompare:name] == NSOrderedSame,
+		                   choose(GpuOutput, name));
+	};
+	const auto submenu = ^(NSString* title, NSArray<UIMenuElement*>* children) {
+		return [UIMenu menuWithTitle:title image:nil identifier:nil options:0 children:children];
+	};
+
+	auto items = [NSMutableArray<UIMenuElement*> array];
+	[items addObject:make_action(@"Default", !output && !shader, choose(nil, nil))];
+	[items addObject:make_action(@"Sharp pixels, no shader", is_sharp, choose(SharpOutput, nil))];
+
+	auto automatic = [NSMutableArray<UIMenuElement*> array];
+	[automatic addObject:shader_action(@"Auto CRT", @"crt-auto")];
+	[automatic addObject:shader_action(@"Auto CRT, like the machine", @"crt-auto-machine")];
+	[automatic addObject:shader_action(@"Auto CRT, arcade", @"crt-auto-arcade")];
+	[automatic addObject:shader_action(@"Auto CRT, sharp arcade", @"crt-auto-arcade-sharp")];
+	[items addObject:[UIMenu menuWithTitle:@""
+	                                 image:nil
+	                            identifier:nil
+	                               options:UIMenuOptionsDisplayInline
+	                              children:automatic]];
+
+	auto known = [NSMutableSet<NSString*> setWithArray:@[
+		@"crt-auto", @"crt-auto-machine", @"crt-auto-arcade", @"crt-auto-arcade-sharp"
+	]];
+
+	auto presets = [NSMutableArray<UIMenuElement*> array];
+	for (NSString* preset in find_crt_presets()) {
+		NSString* const name = [@"crt/crt-hyllian:" stringByAppendingString:preset];
+		[presets addObject:shader_action(preset, name)];
+		[known addObject:name.lowercaseString];
+	}
+	if (presets.count > 0) {
+		[items addObject:submenu(@"CRT presets", presets)];
+	}
+
+	auto others = [NSMutableArray<UIMenuElement*> array];
+	for (NSString* name in find_shaders(bundled_resource(@"shaders"))) {
+		[others addObject:shader_action(name.lastPathComponent, name)];
+		[known addObject:name.lowercaseString];
+	}
+	if (others.count > 0) {
+		[items addObject:submenu(@"Other shaders", others)];
+	}
+
+	auto own = [NSMutableArray<UIMenuElement*> array];
+	for (NSString* name in find_shaders(ShadersFolder)) {
+		[own addObject:shader_action(name, name)];
+		[known addObject:name.lowercaseString];
+	}
+	if (own.count == 0) {
+		auto none = [UIAction actionWithTitle:@"No shaders in the shaders folder"
+		                                image:nil
+		                           identifier:nil
+		                              handler:^(UIAction*) {}];
+		none.attributes = UIMenuElementAttributesDisabled;
+		[own addObject:none];
+	}
+	[items addObject:submenu(@"Your shaders", own)];
+
+	// A shader set by hand in the config file stays selectable
+	if (shader && !is_sharp && ![known containsObject:shader.lowercaseString]) {
+		[items addObject:shader_action(shader, shader)];
+	}
+	return make_menu_button([UIMenu menuWithChildren:items]);
+}
+
 - (UIButton*)musicMenu
 {
 	NSString* const conf_path = _conf_path;
 	NSString* const device    = ReadConfValue(conf_path, @"midi", @"mididevice").lowercaseString;
 	NSString* const soundfont = ReadConfValue(conf_path, @"fluidsynth", @"soundfont");
 
+	__weak DBGameSettingsViewController* weak_self = self;
+
 	const auto choose = ^(NSString* new_device, NSString* new_soundfont) {
 		return ^{
 			WriteConfValue(conf_path, @"midi", @"mididevice", new_device);
 			WriteConfValue(conf_path, @"fluidsynth", @"soundfont", new_soundfont);
+			[weak_self confChanged];
 		};
 	};
 	const auto is_fluidsynth = [device isEqualToString:@"fluidsynth"];
@@ -765,12 +1652,12 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 - (void)install
 {
 	_is_installing = true;
-	[self.tableView reloadData];
+	[self reloadTables];
 
 	NSString* const conf_path = _conf_path;
 	InstallVbeSvga(_windows_dir, ^(NSError* error) {
 		self->_is_installing = false;
-		[self.tableView reloadData];
+		[self reloadTables];
 		if (error) {
 			auto alert = [UIAlertController alertControllerWithTitle:@"Couldn't install VBESVGA"
 			                                                 message:error.localizedDescription
@@ -785,9 +1672,115 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 		if (!ReadConfValue(conf_path, @"dosbox", @"vesa_custom_resolution") &&
 		    !ReadConfValue(@"dosbox.conf", @"dosbox", @"vesa_custom_resolution")) {
 			WriteConfValue(conf_path, @"dosbox", @"vesa_custom_resolution", fit_screen_size());
-			[self.tableView reloadData];
+			[self reloadTables];
 		}
 	});
+}
+
+- (UIButton*)iconMenu
+{
+	__weak DBGameSettingsViewController* weak_self = self;
+	NSString* const conf_path                      = _conf_path;
+
+	auto actions = [NSMutableArray<UIMenuElement*> array];
+	[actions addObject:[UIAction actionWithTitle:@"Photos"
+	                                       image:[UIImage systemImageNamed:@"photo"]
+	                                  identifier:nil
+	                                     handler:^(UIAction*) {
+		                                     [weak_self choosePhoto];
+	                                     }]];
+	[actions addObject:[UIAction actionWithTitle:@"Files"
+	                                       image:[UIImage systemImageNamed:@"folder"]
+	                                  identifier:nil
+	                                     handler:^(UIAction*) {
+		                                     [weak_self chooseIconFile];
+	                                     }]];
+	if ([NSFileManager.defaultManager fileExistsAtPath:CustomIconPath(conf_path)]) {
+		[actions addObject:[UIAction actionWithTitle:@"Use the game's own icon"
+		                                       image:[UIImage systemImageNamed:@"arrow.uturn.backward"]
+		                                  identifier:nil
+		                                     handler:^(UIAction*) {
+			                                     RemoveCustomIcon(conf_path);
+			                                     [weak_self iconChanged];
+		                                     }]];
+	}
+
+	auto config   = UIButtonConfiguration.plainButtonConfiguration;
+	config.title  = @"Choose";
+	auto button   = [UIButton buttonWithConfiguration:config primaryAction:nil];
+	button.menu   = [UIMenu menuWithChildren:actions];
+	button.showsMenuAsPrimaryAction = YES;
+	[button sizeToFit];
+	return button;
+}
+
+- (void)iconChanged
+{
+	// The library shows the icon too
+	[NSNotificationCenter.defaultCenter postNotificationName:GameSettingsChangedNotification
+	                                                  object:nil];
+}
+
+- (void)choosePhoto
+{
+	auto config           = [[PHPickerConfiguration alloc] init];
+	config.filter         = PHPickerFilter.imagesFilter;
+	config.selectionLimit = 1;
+
+	auto picker      = [[PHPickerViewController alloc] initWithConfiguration:config];
+	picker.delegate  = self;
+	[self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)picker:(PHPickerViewController*)picker didFinishPicking:(NSArray<PHPickerResult*>*)results
+{
+	[picker dismissViewControllerAnimated:YES completion:nil];
+
+	NSItemProvider* const provider = results.firstObject.itemProvider;
+	if (![provider canLoadObjectOfClass:UIImage.class]) {
+		return;
+	}
+	__weak DBGameSettingsViewController* weak_self = self;
+	NSString* const conf_path                      = _conf_path;
+	[provider loadObjectOfClass:UIImage.class
+	          completionHandler:^(id<NSItemProviderReading> object, NSError*) {
+		          dispatch_async(dispatch_get_main_queue(), ^{
+			          if ([(NSObject*)object isKindOfClass:UIImage.class] &&
+			              SetCustomIconImage(conf_path, (UIImage*)object)) {
+				          [weak_self iconChanged];
+			          }
+		          });
+	          }];
+}
+
+- (void)chooseIconFile
+{
+	auto picker = [[UIDocumentPickerViewController alloc]
+	        initForOpeningContentTypes:@[UTTypeData]
+	                            asCopy:YES];
+	picker.delegate = self;
+	if (const auto folder = GameFilesFolder(_conf_path)) {
+		picker.directoryURL = [NSURL fileURLWithPath:folder isDirectory:YES].absoluteURL;
+	}
+	[self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController*)controller
+        didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls
+{
+	if (SetCustomIcon(_conf_path, urls.firstObject)) {
+		[self iconChanged];
+		return;
+	}
+	auto alert = [UIAlertController
+	        alertControllerWithTitle:@"No icon in that file"
+	                         message:@"Choose a picture, an .ico file or a Windows program. "
+	                                 @"DOS programs have no icons."
+	                  preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"OK"
+	                                          style:UIAlertActionStyleDefault
+	                                        handler:nil]];
+	[self presentViewController:alert animated:YES completion:nil];
 }
 
 - (UIButton*)mouseMenu
@@ -812,26 +1805,15 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 	return make_menu_button([UIMenu menuWithChildren:@[direct_action, trackpad_action]]);
 }
 
-- (UIButton*)gameKeysMenu
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)indexPath
 {
-	NSString* const game = _game;
-	const auto has_keys  = (GameKeysPanel(game) != nil);
-
-	auto colonization = [UIAction actionWithTitle:@"Colonization"
-	                                        image:nil
-	                                   identifier:nil
-	                                      handler:^(UIAction*) {
-		                                      set_app_setting(game, GameKeysKey, ColonizationKeys);
-	                                      }];
-	auto none = [UIAction actionWithTitle:@"None"
-	                                image:nil
-	                           identifier:nil
-	                              handler:^(UIAction*) {
-		                              set_app_setting(game, GameKeysKey, NoGameKeys);
-	                              }];
-	colonization.state = has_keys ? UIMenuElementStateOn : UIMenuElementStateOff;
-	none.state         = has_keys ? UIMenuElementStateOff : UIMenuElementStateOn;
-	return make_menu_button([UIMenu menuWithChildren:@[colonization, none]]);
+	[tableView deselectRowAtIndexPath:indexPath animated:YES];
+	if ([self section:tableView index:indexPath.section] == ControlsSection &&
+	    indexPath.row == GameKeysRow) {
+		[self.navigationController
+		        pushViewController:[[DBGameKeysViewController alloc] initWithGame:_game]
+		                  animated:YES];
+	}
 }
 
 - (UIButton*)gamepadStickMenu
@@ -905,7 +1887,7 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 	_on_rename(new_name);
 
 	// The menus hold the old name and path
-	[self.tableView reloadData];
+	[self reloadTables];
 }
 
 @end
@@ -916,4 +1898,14 @@ UIViewController* MakeGameSettingsController(NSString* game, NSString* conf_path
 	return [[DBGameSettingsViewController alloc] initWithGame:game
 	                                                 confPath:conf_path
 	                                                 onRename:on_rename];
+}
+
+UIViewController* MakeSharedSettingsController()
+{
+	// A new install has no shared config until something is set in it
+	NSString* const conf_path = @"dosbox.conf";
+	if (![NSFileManager.defaultManager fileExistsAtPath:conf_path]) {
+		[NSFileManager.defaultManager createFileAtPath:conf_path contents:[NSData data] attributes:nil];
+	}
+	return [[DBGameSettingsViewController alloc] initWithGame:nil confPath:conf_path onRename:nil];
 }

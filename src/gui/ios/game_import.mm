@@ -6,6 +6,7 @@
 NSString* const GamesFolder      = @"Games";
 NSString* const SoundFontsFolder = @"soundfonts";
 NSString* const Mt32RomsFolder   = @"mt32-roms";
+NSString* const ShadersFolder    = @"shaders";
 
 static NSString* const GameConfName     = @"dosbox.conf";
 static NSString* const OriginalConfName = @"dosbox-original.conf";
@@ -40,7 +41,7 @@ NSDictionary<NSString*, NSString*>* FindGames()
 
 void CreateLibraryFolders()
 {
-	for (NSString* folder in @[GamesFolder, SoundFontsFolder, Mt32RomsFolder]) {
+	for (NSString* folder in @[GamesFolder, SoundFontsFolder, Mt32RomsFolder, ShadersFolder]) {
 		[NSFileManager.defaultManager createDirectoryAtPath:folder
 		                        withIntermediateDirectories:YES
 		                                         attributes:nil

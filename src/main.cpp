@@ -677,6 +677,9 @@ int main(int argc, char* argv[])
 	// Files app, so a 'dosbox.conf' placed there is loaded as the local config
 	std::error_code ec;
 	std_fs::current_path(resolve_home("~/Documents"), ec);
+
+	// The library can be used in portrait, but games are always landscape
+	SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 #endif
 
 	// The command line of the current run; an in-process restart replaces

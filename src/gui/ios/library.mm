@@ -3,6 +3,7 @@
 
 #include "gui/ios/library.h"
 
+#include "gui/ios/game_icons.h"
 #include "gui/ios/game_import.h"
 #include "gui/ios/game_settings.h"
 #include "gui/ios/windows_display.h"
@@ -12,8 +13,10 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <optional>
+#include <string_view>
 
 #include "utils/string_utils.h"
 
@@ -50,6 +53,9 @@ NSArray<NSString*>* sorted_names(NSDictionary<NSString*, NSString*>* games)
 //
 // - DOSPAD_IMPORT is a game folder to add to the library on launch, started
 //   by DOSPAD_IMPORT_PROGRAM (or the most likely program).
+//
+// - DOSPAD_SET_ICON is 'game=file': a picture, .ico file or program to make
+//   the game's icon on launch, as if chosen in its settings.
 //
 std::optional<std::string> next_autopick()
 {
@@ -94,6 +100,25 @@ void maybe_import_for_testing()
 	      written,
 	      program,
 	      programs);
+}
+
+void maybe_set_icon_for_testing()
+{
+	static bool is_done = false;
+	const auto setting  = std::getenv("DOSPAD_SET_ICON");
+	if (is_done || !setting) {
+		return;
+	}
+	is_done = true;
+
+	const auto parts = [@(setting) componentsSeparatedByString:@"="];
+	if (parts.count != 2) {
+		return;
+	}
+	const auto conf_path = FindGames()[parts[0]];
+	const auto is_set    = conf_path &&
+	                    SetCustomIcon(conf_path, [NSURL fileURLWithPath:parts[1]]);
+	NSLog(@"DOSPAD_SET_ICON: '%@' from '%@': %d", parts[0], parts[1], is_set);
 }
 
 void show_error(UIViewController* presenter, NSString* title, NSError* error)
@@ -185,9 +210,23 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 
 	add(@"Game settings (ⓘ)\n", heading);
 	add(@"Tap ⓘ next to a game to rename it or change its settings: CPU speed, "
-	    @"memory, the picture, music, and the touch controls. They're saved "
-	    @"in the game's dosbox.conf. In a game, the same settings are in the ☰ "
-	    @"menu.\n\n",
+	    @"memory, the picture, the shader, music, and the touch controls. "
+	    @"They're saved in the game's dosbox.conf. In a game, the same settings "
+	    @"are in the ☰ menu.\n\n",
+	    body);
+
+	add(@"Settings for every game (⚙)\n", heading);
+	add(@"The ⚙ button in the library sets what every game starts with, saved "
+	    @"in the shared dosbox.conf. A game's own settings override them.\n\n",
+	    body);
+
+	add(@"Shaders\n", heading);
+	add(@"A shader draws the screen like an old monitor, with scanlines and "
+	    @"glow. Auto CRT picks the look that suits each video mode, from CGA to "
+	    @"VGA; you can also choose one of DOSBox Staging's CRT presets or other "
+	    @"shaders by name. To use your own, put .glsl shader files in the "
+	    @"shaders folder in the Files app. \"Sharp pixels\" turns shaders off "
+	    @"and keeps the pixels crisp and even.\n\n",
 	    body);
 
 	add(@"Gamepad\n", heading);
@@ -204,16 +243,27 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	    @"choose one in a game's Music setting.\n\n",
 	    body);
 
+	add(@"Game keys\n", heading);
+	add(@"A game can have a panel of its own keys, shown with the Game button. "
+	    @"Choose them under Game keys in the game's settings: add the keys the "
+	    @"game uses, each labelled with what it does, or start from a "
+	    @"ready-made set.\n\n",
+	    body);
+
 	add(@"Windows 3.1 games\n", heading);
-	add(@"Install them inside Windows, then add a settings file that starts "
-	    @"Windows with the game, like the Colonization one.\n\n"
-	    @"Windows can fill the screen with VBESVGA, a free display driver by "
+	add(@"Install them inside Windows, then add a settings file for each game "
+	    @"to the Games folder, which starts Windows with the game's program. "
+	    @"If Windows is in a folder called Windows next to the Games folder:"
+	    @"\n\n",
+	    body);
+	add(@"[autoexec]\nmount c Windows\nc:\nwin c:\\mygame\\game.exe\nexit\n\n", code);
+	add(@"Windows can fill the screen with VBESVGA, a free display driver by "
 	    @"PluMGMK. A Windows game's settings can download and install it, and "
 	    @"then set Windows' screen size.\n\n",
 	    body);
 
 	add(@"Removing games\n", heading);
-	add(@"Swipe left on a game to remove it. For a game added with +, that "
+	add(@"Press and hold a game to remove it. For a game added with +, that "
 	    @"deletes its folder and everything in it, including saved games.\n",
 	    body);
 	return result;
@@ -317,20 +367,56 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 
 // The list of games
 
-@interface DBLibraryViewController : UITableViewController <UIDocumentPickerDelegate>
+@interface DBLibraryViewController
+        : UICollectionViewController <UIDocumentPickerDelegate>
 @property(nonatomic, copy) NSDictionary<NSString*, NSString*>* games;
 @property(nonatomic, copy) NSArray<NSString*>* names;
 @property(nonatomic, copy) NSString* chosenGame;
 - (void)showHelp;
+- (void)showSharedSettings;
 - (void)addGame;
 - (void)showSettings:(NSString*)name;
 @end
 
 @implementation DBLibraryViewController
 
+// The narrowest screen that has room for two columns, in points
+constexpr CGFloat TwoColumnWidth = 700;
+
+// One scrolling list of games, two to a row on a wide screen
+static UICollectionViewLayout* make_library_layout()
+{
+	return [[UICollectionViewCompositionalLayout alloc] initWithSectionProvider:^(
+	        NSInteger, id<NSCollectionLayoutEnvironment> environment) {
+		const auto width   = environment.container.effectiveContentSize.width;
+		const auto columns = (width >= TwoColumnWidth) ? 2 : 1;
+
+		const auto height = [NSCollectionLayoutDimension estimatedDimension:56];
+		auto item         = [NSCollectionLayoutItem
+                itemWithLayoutSize:[NSCollectionLayoutSize
+		                                   sizeWithWidthDimension:[NSCollectionLayoutDimension
+		                                                                  fractionalWidthDimension:1.0 / columns]
+		                                          heightDimension:height]];
+		auto group = [NSCollectionLayoutGroup
+		        horizontalGroupWithLayoutSize:[NSCollectionLayoutSize
+		                                              sizeWithWidthDimension:[NSCollectionLayoutDimension
+		                                                                             fractionalWidthDimension:1]
+		                                                     heightDimension:height]
+		                     repeatingSubitem:item
+		                                count:columns];
+		group.interItemSpacing = [NSCollectionLayoutSpacing fixedSpacing:16];
+
+		auto section                    = [NSCollectionLayoutSection sectionWithGroup:group];
+		section.interGroupSpacing       = 12;
+		section.contentInsetsReference  = UIContentInsetsReferenceLayoutMargins;
+		section.contentInsets           = NSDirectionalEdgeInsetsMake(16, 0, 16, 0);
+		return section;
+	}];
+}
+
 - (instancetype)init
 {
-	self = [super initWithStyle:UITableViewStyleInsetGrouped];
+	self = [super initWithCollectionViewLayout:make_library_layout()];
 	if (self) {
 		self.title = @"Games";
 		[self loadGames];
@@ -338,32 +424,77 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	return self;
 }
 
+- (void)reloadTables
+{
+	[self.collectionView reloadData];
+	[self showEmptyMessage];
+}
+
+- (void)showEmptyMessage
+{
+	if (self.names.count > 0) {
+		self.collectionView.backgroundView = nil;
+		return;
+	}
+	auto label           = [[UILabel alloc] init];
+	label.text           = @"No games yet. Tap + to add one, or ? to see how.";
+	label.textColor      = UIColor.secondaryLabelColor;
+	label.textAlignment  = NSTextAlignmentCenter;
+	label.numberOfLines  = 0;
+	self.collectionView.backgroundView = label;
+}
+
+- (NSString*)nameAt:(NSIndexPath*)index_path
+{
+	return self.names[static_cast<NSUInteger>(index_path.item)];
+}
+
 - (void)viewDidLoad
 {
 	[super viewDidLoad];
-	[self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:@"game"];
+	self.collectionView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+	[self.collectionView registerClass:UICollectionViewListCell.class
+	        forCellWithReuseIdentifier:@"game"];
+	[self showEmptyMessage];
+
+	// Icons can be changed in a game's settings
+	[NSNotificationCenter.defaultCenter addObserver:self
+	                                       selector:@selector(reloadTables)
+	                                           name:GameSettingsChangedNotification
+	                                         object:nil];
 
 	self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
 	        initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
 	                             target:self
 	                             action:@selector(addGame)];
-	self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
-	        initWithImage:[UIImage systemImageNamed:@"questionmark.circle"]
-	                style:UIBarButtonItemStylePlain
-	               target:self
-	               action:@selector(showHelp)];
+	self.navigationItem.leftBarButtonItems = @[
+		[[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"questionmark.circle"]
+		                                 style:UIBarButtonItemStylePlain
+		                                target:self
+		                                action:@selector(showHelp)],
+		[[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"gearshape"]
+		                                 style:UIBarButtonItemStylePlain
+		                                target:self
+		                                action:@selector(showSharedSettings)],
+	];
+}
+
+- (void)showSharedSettings
+{
+	[self.navigationController pushViewController:MakeSharedSettingsController() animated:YES];
 }
 
 - (void)loadGames
 {
 	self.games = FindGames();
 	self.names = sorted_names(self.games);
+	ForgetGameIcons();
 }
 
 - (void)reload
 {
 	[self loadGames];
-	[self.tableView reloadData];
+	[self reloadTables];
 }
 
 - (void)showHelp
@@ -464,43 +595,44 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	[self.navigationController pushViewController:picker animated:YES];
 }
 
-- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section
+- (NSInteger)collectionView:(UICollectionView*)collectionView
+     numberOfItemsInSection:(NSInteger)section
 {
 	return static_cast<NSInteger>(self.names.count);
 }
 
-- (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section
+- (UICollectionViewCell*)collectionView:(UICollectionView*)collectionView
+                 cellForItemAtIndexPath:(NSIndexPath*)indexPath
 {
-	if (self.names.count == 0) {
-		return @"No games yet. Tap + to add one, or ? to see how.";
-	}
-	return nil;
-}
+	auto cell = static_cast<UICollectionViewListCell*>(
+	        [collectionView dequeueReusableCellWithReuseIdentifier:@"game" forIndexPath:indexPath]);
+	NSString* const name = [self nameAt:indexPath];
 
-- (UITableViewCell*)tableView:(UITableView*)tableView
-        cellForRowAtIndexPath:(NSIndexPath*)indexPath
-{
-	auto cell = [tableView dequeueReusableCellWithIdentifier:@"game"
-	                                            forIndexPath:indexPath];
 	auto content  = cell.defaultContentConfiguration;
-	content.text  = self.names[static_cast<NSUInteger>(indexPath.row)];
-	content.image = [UIImage systemImageNamed:@"play.rectangle"];
+	content.text  = name;
+	content.image = GameIcon(self.games[name]) ?: [UIImage systemImageNamed:@"play.rectangle"];
+	content.imageProperties.reservedLayoutSize = CGSizeMake(GameIconSize, GameIconSize);
 	cell.contentConfiguration = content;
-	cell.accessoryType        = UITableViewCellAccessoryDetailButton;
+
+	auto background         = UIBackgroundConfiguration.listGroupedCellConfiguration;
+	background.cornerRadius = 12;
+	cell.backgroundConfiguration = background;
+
+	// The (i) button opens the game's settings
+	__weak DBLibraryViewController* weak_self = self;
+	auto info          = [[UICellAccessoryDetail alloc] init];
+	info.actionHandler = ^{
+		[weak_self showSettings:name];
+	};
+	cell.accessories = @[info];
 	return cell;
 }
 
-- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)indexPath
+- (void)collectionView:(UICollectionView*)collectionView
+        didSelectItemAtIndexPath:(NSIndexPath*)indexPath
 {
-	[tableView deselectRowAtIndexPath:indexPath animated:YES];
-	self.chosenGame = self.names[static_cast<NSUInteger>(indexPath.row)];
-}
-
-// The (i) button opens the game's settings
-- (void)tableView:(UITableView*)tableView
-        accessoryButtonTappedForRowWithIndexPath:(NSIndexPath*)indexPath
-{
-	[self showSettings:self.names[static_cast<NSUInteger>(indexPath.row)]];
+	[collectionView deselectItemAtIndexPath:indexPath animated:YES];
+	self.chosenGame = [self nameAt:indexPath];
 }
 
 - (void)showSettings:(NSString*)name
@@ -512,21 +644,41 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 	[self.navigationController pushViewController:settings animated:YES];
 }
 
-- (UISwipeActionsConfiguration*)tableView:(UITableView*)tableView
-        trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath*)indexPath
+// Pressing and holding a game offers its settings and removing it
+- (UIContextMenuConfiguration*)collectionView:(UICollectionView*)collectionView
+    contextMenuConfigurationForItemsAtIndexPaths:(NSArray<NSIndexPath*>*)indexPaths
+                                           point:(CGPoint)point
 {
-	NSString* name      = self.names[static_cast<NSUInteger>(indexPath.row)];
-	NSString* conf_path = self.games[name];
+	if (indexPaths.count != 1) {
+		return nil;
+	}
+	NSString* const name      = [self nameAt:indexPaths.firstObject];
+	NSString* const conf_path = self.games[name];
 
-	auto remove = [UIContextualAction
-	        contextualActionWithStyle:UIContextualActionStyleDestructive
-	                            title:@"Remove"
-	                          handler:^(UIContextualAction*, UIView*, void (^done)(BOOL)) {
-		                          [self confirmRemoving:name
-		                                       confPath:conf_path
-		                                     completion:done];
-	                          }];
-	return [UISwipeActionsConfiguration configurationWithActions:@[remove]];
+	__weak DBLibraryViewController* weak_self = self;
+	return [UIContextMenuConfiguration
+	        configurationWithIdentifier:nil
+	                    previewProvider:nil
+	                     actionProvider:^(NSArray<UIMenuElement*>*) {
+		                     auto settings = [UIAction
+		                             actionWithTitle:@"Settings"
+		                                       image:[UIImage systemImageNamed:@"info.circle"]
+		                                  identifier:nil
+		                                     handler:^(UIAction*) {
+			                                     [weak_self showSettings:name];
+		                                     }];
+		                     auto remove = [UIAction
+		                             actionWithTitle:@"Remove"
+		                                       image:[UIImage systemImageNamed:@"trash"]
+		                                  identifier:nil
+		                                     handler:^(UIAction*) {
+			                                     [weak_self confirmRemoving:name
+			                                                       confPath:conf_path
+			                                                     completion:^(BOOL) {}];
+		                                     }];
+		                     remove.attributes = UIMenuElementAttributesDestructive;
+		                     return [UIMenu menuWithChildren:@[settings, remove]];
+	                     }];
 }
 
 // A game folder holds the game's files and saved games, so ask first
@@ -556,6 +708,9 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 		                                        const auto removed = [NSFileManager.defaultManager
 		                                                removeItemAtPath:target
 		                                                           error:nil];
+		                                        if (removed && !is_folder) {
+			                                        RemoveCustomIcon(conf_path);
+		                                        }
 		                                        [self reload];
 		                                        done(removed);
 	                                        }]];
@@ -563,6 +718,23 @@ void show_error(UIViewController* presenter, NSString* title, NSError* error)
 }
 
 @end
+
+// The way up the device is held, if the screen can turn that way. The
+// device's left is the screen's right.
+static UIInterfaceOrientationMask held_orientation(const UIInterfaceOrientationMask allowed)
+{
+	auto held = allowed;
+	switch (UIDevice.currentDevice.orientation) {
+	case UIDeviceOrientationPortrait: held = UIInterfaceOrientationMaskPortrait; break;
+	case UIDeviceOrientationPortraitUpsideDown:
+		held = UIInterfaceOrientationMaskPortraitUpsideDown;
+		break;
+	case UIDeviceOrientationLandscapeLeft: held = UIInterfaceOrientationMaskLandscapeRight; break;
+	case UIDeviceOrientationLandscapeRight: held = UIInterfaceOrientationMaskLandscapeLeft; break;
+	default: break;
+	}
+	return (held & allowed) ? held : allowed;
+}
 
 static UIWindowScene* active_window_scene()
 {
@@ -579,7 +751,10 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 	static UIWindow* window = nil;
 
 	CreateLibraryFolders();
+	// So the library knows how the device is held when a game ends
+	[UIDevice.currentDevice beginGeneratingDeviceOrientationNotifications];
 	maybe_import_for_testing();
+	maybe_set_icon_for_testing();
 	SetCurrentGame(nil, nil);
 
 	auto library = [[DBLibraryViewController alloc] init];
@@ -604,8 +779,17 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 		        initWithRootViewController:library];
 		[window makeKeyAndVisible];
 
+		// After a game, which is always landscape, turn back to however
+		// the device is held
+		[window.rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
+		[scene requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc]
+		                                                    initWithInterfaceOrientations:held_orientation(
+		                                                                                          window.rootViewController
+		                                                                                                  .supportedInterfaceOrientations)]
+		                               errorHandler:nil];
+
 		// Test hooks: open the help page, the folder picker or a game's
-		// settings (for screenshots)
+		// settings, or with '*' the settings for every game (for screenshots)
 		if (std::getenv("DOSPAD_SHOW_HELP")) {
 			[library showHelp];
 		}
@@ -613,7 +797,11 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 			[library addGame];
 		}
 		if (const auto name = std::getenv("DOSPAD_SHOW_SETTINGS")) {
-			[library showSettings:@(name)];
+			if (std::string_view(name) == "*") {
+				[library showSharedSettings];
+			} else {
+				[library showSettings:@(name)];
+			}
 		}
 
 		// The emulator owns the main thread, so run the main run loop

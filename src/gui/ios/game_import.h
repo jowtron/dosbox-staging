@@ -16,9 +16,11 @@
 
 extern NSString* const GamesFolder;
 
-// Where the user puts SoundFonts and MT-32 ROMs; Staging looks there too
+// Where the user puts SoundFonts, MT-32 ROMs and shaders; Staging looks
+// there too
 extern NSString* const SoundFontsFolder;
 extern NSString* const Mt32RomsFolder;
+extern NSString* const ShadersFolder;
 
 // Creates the folders above, so they show in the Files app
 void CreateLibraryFolders();

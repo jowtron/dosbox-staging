@@ -6,6 +6,8 @@
 
 #import <UIKit/UIKit.h>
 
+#include <vector>
+
 // Each game's settings. Emulator settings (CPU speed, memory, etc.) are
 // written into the game's own config file, on top of the shared
 // 'dosbox.conf'; settings only the app knows about (mouse mode, game keys,
@@ -23,9 +25,21 @@ void SetCurrentGame(NSString* name, NSString* conf_path);
 bool IsDirectTouch(NSString* game);
 void SetDirectTouch(NSString* game, bool direct_touch);
 
-// The game's key panel, or nil for none
-NSString* GameKeysPanel(NSString* game);
-extern NSString* const ColonizationKeys;
+// The game's own key panel, shown with the Game toggle: a ready-made set
+// (some games get one without choosing), keys the user picked, or none
+struct GameKey {
+	int scancode       = 0; // an SDL scancode
+	int modifiers      = 0; // held with the key: a mix of the flags below
+	NSString* caption = nil; // what the key does, or nil
+};
+constexpr int GameKeyShift = 1;
+constexpr int GameKeyCtrl  = 2;
+constexpr int GameKeyAlt   = 4;
+
+std::vector<GameKey> GetGameKeys(NSString* game);
+
+// The key's name on a key cap, such as 'Ctrl+T'
+NSString* GameKeyLabel(const GameKey& key);
 
 // The on-screen gamepad: a stick and four buttons, shown with its toggle.
 // The stick presses the arrow keys or moves the emulated joystick.
@@ -47,5 +61,9 @@ NSString* GamepadButtonLabel(int action);
 // the game is running); it's called with the game's new name.
 UIViewController* MakeGameSettingsController(NSString* game, NSString* conf_path,
                                              void (^on_rename)(NSString* new_name));
+
+// The same screen for the settings every game starts from, in the shared
+// dosbox.conf
+UIViewController* MakeSharedSettingsController();
 
 #endif // DOSBOX_IOS_GAME_SETTINGS_H

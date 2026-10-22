@@ -178,6 +178,7 @@ struct KeyDef {
 	SDL_Scancode scancode = SDL_SCANCODE_UNKNOWN;
 	float width_units   = 1.0f;
 	NSString* caption   = nil; // optional second line saying what the key does
+	int modifiers       = 0;   // GameKey modifier flags, held with the key
 };
 
 // Each row is 15 units wide; an UNKNOWN scancode is an empty gap
@@ -296,29 +297,47 @@ std::vector<std::vector<KeyDef>> numpad_layout()
 	};
 }
 
-// Game-specific keys for Sid Meier's Colonization. The unit order keys come
-// from the order table in the game's COLTEXT0.DLL.
-std::vector<std::vector<KeyDef>> colonization_layout()
+// A game's keys, in rows of up to six, as even as they'll go
+constexpr int MaxGameKeysPerRow = 6;
+
+std::vector<std::vector<KeyDef>> game_keys_layout(const std::vector<GameKey>& keys)
 {
-	return {
-	        {{@"B", SDL_SCANCODE_B, 1.0f, @"Build colony"},
-	         {@"F", SDL_SCANCODE_F, 1.0f, @"Fortify"},
-	         {@"S", SDL_SCANCODE_S, 1.0f, @"Sentry"},
-	         {@"G", SDL_SCANCODE_G, 1.0f, @"Go to"},
-	         {@"P", SDL_SCANCODE_P, 1.0f, @"Clear/plow"},
-	         {@"R", SDL_SCANCODE_R, 1.0f, @"Road"}},
-	        {{@"T", SDL_SCANCODE_T, 1.0f, @"Trade route"},
-	         {@"L", SDL_SCANCODE_L, 1.0f, @"Live in village"},
-	         {@"W", SDL_SCANCODE_W, 1.0f, @"Wait"},
-	         {@"Space", SDL_SCANCODE_SPACE, 1.0f, @"No orders"},
-	         {@"Enter", SDL_SCANCODE_RETURN},
-	         {@"Esc", SDL_SCANCODE_ESCAPE}},
-	};
+	const auto count     = static_cast<int>(keys.size());
+	const auto row_count = (count + MaxGameKeysPerRow - 1) / MaxGameKeysPerRow;
+	const auto per_row   = (row_count == 0) ? 0 : (count + row_count - 1) / row_count;
+
+	std::vector<std::vector<KeyDef>> rows = {};
+	for (int i = 0; i < count; ++i) {
+		if (i % per_row == 0) {
+			rows.emplace_back();
+		}
+		const auto& key = keys[static_cast<size_t>(i)];
+		rows.back().push_back({GameKeyLabel(key),
+		                       static_cast<SDL_Scancode>(key.scancode),
+		                       1.0f,
+		                       key.caption.length > 0 ? key.caption : nil,
+		                       key.modifiers});
+	}
+	return rows;
 }
 
-constexpr float KeyboardUnits     = 15.0f;
-constexpr float NumpadUnits       = 4.0f;
-constexpr float ColonizationUnits = 6.0f;
+std::vector<SDL_Scancode> modifier_keys(const int modifiers)
+{
+	std::vector<SDL_Scancode> keys = {};
+	if (modifiers & GameKeyCtrl) {
+		keys.push_back(SDL_SCANCODE_LCTRL);
+	}
+	if (modifiers & GameKeyAlt) {
+		keys.push_back(SDL_SCANCODE_LALT);
+	}
+	if (modifiers & GameKeyShift) {
+		keys.push_back(SDL_SCANCODE_LSHIFT);
+	}
+	return keys;
+}
+
+constexpr float KeyboardUnits = 15.0f;
+constexpr float NumpadUnits   = 4.0f;
 
 } // namespace
 
@@ -329,6 +348,7 @@ constexpr float ColonizationUnits = 6.0f;
 @property(nonatomic) float widthUnits;
 @property(nonatomic, copy) NSString* label;
 @property(nonatomic, copy) NSString* caption;
+@property(nonatomic) int modifiers;
 @end
 
 @implementation DBKeyButton
@@ -381,6 +401,7 @@ constexpr float ColonizationUnits = 6.0f;
 
 			button.scancode   = def.scancode;
 			button.widthUnits = def.width_units;
+			button.modifiers  = def.modifiers;
 			button.hidden     = (def.scancode == SDL_SCANCODE_UNKNOWN);
 			button.exclusiveTouch       = NO;
 			button.multipleTouchEnabled = YES;
@@ -672,6 +693,11 @@ constexpr float ColonizationUnits = 6.0f;
 		_applied_modifiers.push_back(modifier);
 	}
 	_latched_modifiers.clear();
+
+	for (const auto modifier : modifier_keys(button.modifiers)) {
+		push_key(modifier, true);
+		_applied_modifiers.push_back(modifier);
+	}
 
 	push_key(scancode, true);
 }
@@ -1097,7 +1123,9 @@ void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
 @implementation DBTouchOverlay {
 	DBKeyboardView* _keyboard;
 	DBKeyboardView* _numpad;
-	DBKeyboardView* _gameKeys;
+	DBKeyboardView* _gameKeys; // nil if the game has no keys of its own
+	int _game_key_rows;
+	int _game_key_columns;
 	DBGamepadStick* _stick;
 	DBGamepadButtons* _gamepadButtons;
 	UIButton* _keyboardToggle;
@@ -1162,13 +1190,6 @@ void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
 	[self addSubview:_numpad];
 	[self makeMovable:_numpad];
 
-	_gameKeys = [[DBKeyboardView alloc] initWithLayout:colonization_layout()
-	                                          rowUnits:ColonizationUnits];
-	_gameKeys.hidden  = YES;
-	_gameKeys.movable = true;
-	[self addSubview:_gameKeys];
-	[self makeMovable:_gameKeys];
-
 	_stick          = [[DBGamepadStick alloc] initWithFrame:CGRectZero];
 	_gamepadButtons = [[DBGamepadButtons alloc] initWithFrame:CGRectZero];
 	[self addSubview:_stick];
@@ -1198,6 +1219,12 @@ void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
 	_menuButton.showsMenuAsPrimaryAction = YES;
 
 	[self refreshGameSettings];
+
+	// Test hook: start with the Game keys showing
+	if (std::getenv("DOSPAD_SHOW_GAME_KEYS")) {
+		_gameKeys.hidden = NO;
+	}
+
 	[NSNotificationCenter.defaultCenter addObserver:self
 	                                       selector:@selector(refreshGameSettings)
 	                                           name:GameSettingsChangedNotification
@@ -1311,19 +1338,25 @@ void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
 	                         bounds.size.height * WideScreenAspect;
 	_gameKeys.vertical = wide_screen && _keyboard.hidden;
 
+	// Each row of keys becomes a column
 	if (_gameKeys.vertical) {
 		const CGFloat column_width = 68.0;
-		const CGFloat game_keys_width = 2 * column_width + 12;
+		const CGFloat game_keys_width = _game_key_rows * column_width + 12;
 		const CGFloat game_keys_height = std::min(
-		        6 * 50.0 + 12, panels_bottom - toggles_bottom - 8);
+		        _game_key_columns * 50.0 + 12, panels_bottom - toggles_bottom - 8);
 
 		_gameKeys.frame = CGRectMake(safe.left + 12,
 		                             panels_bottom - game_keys_height,
 		                             game_keys_width,
 		                             game_keys_height);
 	} else {
-		const CGFloat game_keys_width = std::min(bounds.size.width * 0.42, 540.0);
-		const CGFloat game_keys_height = std::min(game_keys_width * 0.26, 140.0);
+		// Six keys fill this width
+		const CGFloat full_width = std::min(bounds.size.width * 0.42, 540.0);
+		const CGFloat row_height = std::min(full_width * 0.13, 70.0);
+
+		const CGFloat game_keys_width = full_width * _game_key_columns / MaxGameKeysPerRow;
+		const CGFloat game_keys_height = std::min(_game_key_rows * row_height,
+		                                          panels_bottom - toggles_bottom - 8);
 
 		_gameKeys.frame = CGRectMake(safe.left + 12,
 		                             panels_bottom - game_keys_height,
@@ -1465,6 +1498,12 @@ void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
 	auto settings = MakeGameSettingsController(CurrentGameName(), CurrentGameConfPath(), nil);
 	auto navigation = [[UINavigationController alloc] initWithRootViewController:settings];
 	navigation.modalPresentationStyle = UIModalPresentationFormSheet;
+	// On an iPad, wide enough for the settings' two columns
+	if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+		const auto screen = self.window.bounds.size;
+		navigation.preferredContentSize = CGSizeMake(std::min(screen.width - 80, 960.0),
+		                                             std::min(screen.height - 80, 800.0));
+	}
 	[self.window.rootViewController presentViewController:navigation
 	                                             animated:YES
 	                                           completion:nil];
@@ -1478,10 +1517,7 @@ void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
 	_direct_touch = IsDirectTouch(game);
 	[self refreshPointerToggle];
 
-	_gameKeysToggle.hidden = (GameKeysPanel(game) == nil);
-	if (_gameKeysToggle.hidden) {
-		_gameKeys.hidden = YES;
-	}
+	[self rebuildGameKeys:GetGameKeys(game)];
 
 	// Outside a game there's nowhere to keep it, so it stays as it was
 	if (game) {
@@ -1509,6 +1545,31 @@ void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
 	_enabled_joystick = uses_joystick;
 
 	[self setNeedsLayout];
+}
+
+// Replaces the Game panel with one holding these keys, keeping it shown or
+// hidden as it was
+- (void)rebuildGameKeys:(const std::vector<GameKey>&)keys
+{
+	const auto was_hidden = !_gameKeys || _gameKeys.hidden;
+	[_gameKeys removeFromSuperview];
+	_gameKeys = nil;
+
+	_gameKeysToggle.hidden = keys.empty();
+	if (keys.empty()) {
+		return;
+	}
+
+	const auto layout = game_keys_layout(keys);
+	_game_key_rows    = static_cast<int>(layout.size());
+	_game_key_columns = static_cast<int>(layout.front().size());
+
+	_gameKeys = [[DBKeyboardView alloc] initWithLayout:layout
+	                                          rowUnits:static_cast<float>(_game_key_columns)];
+	_gameKeys.hidden  = was_hidden;
+	_gameKeys.movable = true;
+	[self insertSubview:_gameKeys belowSubview:_stick];
+	[self makeMovable:_gameKeys];
 }
 
 // Turns off the emulated joystick if the gamepad turned it on, unless a
@@ -1830,6 +1891,14 @@ void IOS_InstallTouchOverlay(SDL_Window* window)
 
 		cursor_x = static_cast<float>(root_view.bounds.size.width / 2);
 		cursor_y = static_cast<float>(root_view.bounds.size.height / 2);
+
+		// Turn to landscape if the library was in portrait; the game's
+		// window only allows landscape, but iOS doesn't turn by itself
+		[ui_window.rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
+		[ui_window.windowScene
+		        requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc]
+		                                                     initWithInterfaceOrientations:UIInterfaceOrientationMaskLandscape]
+		                                errorHandler:nil];
 	}
 
 	// The renderer may add its Metal view after us; stay on top of it
