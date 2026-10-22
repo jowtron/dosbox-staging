@@ -403,14 +403,61 @@ void SdlGpuRenderer::PrepareFrame()
 	upload_pending      = true;
 }
 
+void SdlGpuRenderer::LogFrameRate()
+{
+	constexpr auto LogIntervalMs = 10'000;
+
+	const auto now_ms = static_cast<int64_t>(SDL_GetTicks());
+	if (frame_log_start_ms == 0) {
+		frame_log_start_ms = now_ms;
+	}
+	if (now_ms - frame_log_start_ms < LogIntervalMs) {
+		return;
+	}
+	const auto elapsed_s = static_cast<double>(now_ms - frame_log_start_ms) / 1000;
+	LOG_INFO("SDLGPU: Showed %.1f frames per second, skipped %.1f while the GPU was busy",
+	         frames_shown / elapsed_s,
+	         frames_skipped / elapsed_s);
+
+	frames_shown       = 0;
+	frames_skipped     = 0;
+	frame_log_start_ms = now_ms;
+}
+
 void SdlGpuRenderer::PresentFrame()
 {
+	LogFrameRate();
+
 	auto command_buffer = SDL_AcquireGPUCommandBuffer(device);
 	if (!command_buffer) {
 		LOG_ERR("SDLGPU: Error acquiring command buffer: %s",
 		        SDL_GetError());
 		return;
 	}
+
+	// Waiting for a swapchain texture would stall the emulation whenever
+	// the GPU falls behind (a heavy shader on a large, fast display), so
+	// the frame is skipped instead; the pending upload is kept for the
+	// next one. The texture is also null if the window is minimised.
+	SDL_GPUTexture* swapchain_texture = nullptr;
+
+	Uint32 swapchain_width_px  = 0;
+	Uint32 swapchain_height_px = 0;
+
+	if (!SDL_AcquireGPUSwapchainTexture(command_buffer,
+	                                    window,
+	                                    &swapchain_texture,
+	                                    &swapchain_width_px,
+	                                    &swapchain_height_px)) {
+		LOG_ERR("SDLGPU: Error acquiring swapchain texture: %s",
+		        SDL_GetError());
+	}
+	if (!swapchain_texture) {
+		SDL_CancelGPUCommandBuffer(command_buffer);
+		++frames_skipped;
+		return;
+	}
+	++frames_shown;
 
 	if (upload_pending && input_texture.texture) {
 		auto copy_pass = SDL_BeginGPUCopyPass(command_buffer);
@@ -442,22 +489,7 @@ void SdlGpuRenderer::PresentFrame()
 		shader_pipeline->Render(command_buffer, canvas.texture);
 	}
 
-	SDL_GPUTexture* swapchain_texture = nullptr;
-
-	Uint32 swapchain_width_px  = 0;
-	Uint32 swapchain_height_px = 0;
-
-	if (!SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer,
-	                                           window,
-	                                           &swapchain_texture,
-	                                           &swapchain_width_px,
-	                                           &swapchain_height_px)) {
-		LOG_ERR("SDLGPU: Error acquiring swapchain texture: %s",
-		        SDL_GetError());
-	}
-
-	// The swapchain texture is null if the window is minimised
-	if (swapchain_texture && canvas.texture) {
+	if (canvas.texture) {
 		SDL_GPUBlitInfo blit = {};
 
 		blit.source.texture = canvas.texture;

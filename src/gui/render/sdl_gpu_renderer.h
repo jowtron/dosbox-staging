@@ -91,6 +91,7 @@ private:
 	bool InitRenderer();
 
 	void SetSwapchainParameters(const SDL_GPUPresentMode present_mode);
+	void LogFrameRate();
 
 	void RecreateInputTexture();
 	void MaybeRecreateCanvasTexture();
@@ -120,6 +121,11 @@ private:
 	// True if the upload transfer buffer holds a frame that hasn't been
 	// copied into the input texture yet
 	bool upload_pending = false;
+
+	// Frames shown and skipped since the last frame rate log line
+	int frames_shown           = 0;
+	int frames_skipped         = 0;
+	int64_t frame_log_start_ms = 0;
 
 	struct {
 		int width                            = 0;
