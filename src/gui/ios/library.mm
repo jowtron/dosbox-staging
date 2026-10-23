@@ -27,15 +27,26 @@ namespace {
 const std::vector<std::string> RequiredSettings = {
         // The app is always full screen
         "sdl fullscreen=true",
-        // iOS always waits for the display's refresh; presenting at the DOS
-        // rate stalls the emulator on 60 Hz screens
-        "sdl presentation_mode=host-rate",
         // The touch overlay's direct touch mode needs absolute pointing
         "mouse mouse_capture=seamless",
         // Pause while the app is in the background (or the Control Centre
         // or a call covers it)
         "sdl pause_when_inactive=true",
 };
+
+// iOS always waits for the display's refresh before handing out the next
+// frame, on the emulator's thread. Presenting at the DOS rate (up to 70 Hz)
+// on a 60 Hz screen stalls it on every frame, so those screens present at
+// the host rate. On a 120 Hz screen the DOS rate leaves frames to spare, so
+// the wait rarely happens, whereas presenting at the host rate keeps the
+// frame queue full and waits on nearly every frame.
+std::string PresentationSetting()
+{
+	constexpr auto FastScreenHz = 100;
+	const auto screen_hz = static_cast<int>(UIScreen.mainScreen.maximumFramesPerSecond);
+	return std::string("sdl presentation_mode=") +
+	       (screen_hz >= FastScreenHz ? "dos-rate" : "host-rate");
+}
 
 // The game to start again without showing the library
 NSString* restarting_game = nil;
@@ -822,6 +833,7 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 	for (const auto& setting : RequiredSettings) {
 		args.insert(args.end(), {"--set", setting});
 	}
+	args.insert(args.end(), {"--set", PresentationSetting()});
 	return args;
 }
 

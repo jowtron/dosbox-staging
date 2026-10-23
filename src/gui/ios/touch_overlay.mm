@@ -1866,11 +1866,15 @@ void IOS_RemoveTouchOverlay()
 {
 	[overlay shutDown];
 	overlay = nil;
+	UIApplication.sharedApplication.idleTimerDisabled = NO;
 }
 
 void IOS_InstallTouchOverlay(SDL_Window* window)
 {
 	sdl_window = window;
+
+	// A game being watched rather than touched mustn't lock the screen
+	UIApplication.sharedApplication.idleTimerDisabled = YES;
 
 	const auto properties = SDL_GetWindowProperties(window);
 	auto ui_window = (__bridge UIWindow*)SDL_GetPointerProperty(
