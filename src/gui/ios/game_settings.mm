@@ -167,6 +167,19 @@ const std::vector<ConfSetting>& conf_settings()
 	         {{@"4:3, like a CRT", @"on"},
 	          {@"Square pixels", @"square-pixels"},
 	          {@"Fill the screen", @"stretch"}}},
+	        {@"Integer scaling",
+	         @"render",
+	         @[@"integer_scaling"],
+	         {{@"Whole steps for CRT shaders",
+	           @"auto",
+	           @"Staging's default: CRT shaders shrink the picture to even scanlines, "
+	           @"leaving black bars; sharp pixels fill the screen"},
+	          {@"Whole steps always",
+	           @"vertical",
+	           @"Every picture shrinks to a whole number of pixels per line"},
+	          {@"Fill the screen",
+	           @"off",
+	           @"CRT scanlines band at sizes that don't divide the screen evenly"}}},
 	};
 	return settings;
 }
