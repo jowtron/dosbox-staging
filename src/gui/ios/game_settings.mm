@@ -147,6 +147,8 @@ struct ConfSetting {
 	// All are set to the same value; the first is read back
 	NSArray<NSString*>* keys;
 	std::vector<Choice> choices;
+	// The explanation under the row when no config sets the value
+	NSString* default_detail = nil;
 };
 
 const std::vector<ConfSetting>& conf_settings()
@@ -155,27 +157,64 @@ const std::vector<ConfSetting>& conf_settings()
 	        {@"CPU speed",
 	         @"cpu",
 	         @[@"cpu_cycles", @"cpu_cycles_protected"],
-	         {{@"386SX (3,000)", @"3000"},
-	          {@"386DX (8,000)", @"8000"},
-	          {@"486 (25,000)", @"25000"},
-	          {@"Pentium (50,000)", @"50000"},
-	          {@"As fast as possible", @"max"}}},
+	         {{@"386SX (3,000)",
+	           @"3000",
+	           nil,
+	           @"About a 386SX: for early games that run too fast on anything quicker."},
+	          {@"386DX (8,000)", @"8000", nil, @"About a 386DX: most games up to around 1992."},
+	          {@"486 (25,000)", @"25000", nil, @"About a 486: games up to around 1995."},
+	          {@"Pentium (50,000)",
+	           @"50000",
+	           nil,
+	           @"About a Pentium: late DOS games, if the device keeps up."},
+	          {@"As fast as possible",
+	           @"max",
+	           nil,
+	           @"Everything the device can give, at the DOS prompt and in Windows. Games that "
+	           @"pace themselves by the CPU run too fast."}},
+	         @"Staging's default: 3,000 cycles at the DOS prompt, 60,000 in Windows and other "
+	         @"protected-mode programs."},
 	        {@"Memory",
 	         @"dosbox",
 	         @[@"memsize"],
-	         {{@"4 MB", @"4"}, {@"8 MB", @"8"}, {@"16 MB", @"16"}, {@"32 MB", @"32"}, {@"64 MB", @"64"}}},
+	         {{@"4 MB", @"4", nil, @"Enough for early games; a few refuse to run with more."},
+	          {@"8 MB", @"8", nil, @"Plenty for most DOS games."},
+	          {@"16 MB",
+	           @"16",
+	           nil,
+	           @"Staging's default: fine for Windows 3.1 and nearly every game."},
+	          {@"32 MB",
+	           @"32",
+	           nil,
+	           @"For the few late games that ask for it. Some take longer to start with more "
+	           @"memory."},
+	          {@"64 MB", @"64", nil, @"Only for games that need it; starting can take longer."}},
+	         @"Staging's default: 16 MB."},
 	        {@"Picture",
 	         @"render",
 	         @[@"aspect"],
-	         {{@"4:3, like a CRT", @"on"},
-	          {@"Square pixels", @"square-pixels"},
-	          {@"Fill the screen", @"stretch"}}},
+	         {{@"4:3, like a CRT",
+	           @"on",
+	           nil,
+	           @"Modes with tall pixels, such as 320x200, are shown as a 4:3 monitor showed "
+	           @"them. Square-pixel modes are left alone."},
+	          {@"Square pixels",
+	           @"square-pixels",
+	           nil,
+	           @"No correction: 320x200 games look squat, but a few, such as ports of Amiga "
+	           @"games, were drawn for this."},
+	          {@"Fill the screen",
+	           @"stretch",
+	           nil,
+	           @"Stretches the picture to the screen's shape, whatever the game's."}},
+	         @"Staging's default: 4:3 for modes with tall pixels, square-pixel modes as they "
+	         @"are."},
 	        {@"Integer scaling",
 	         @"render",
 	         @[@"integer_scaling"],
-	         {{@"Whole steps for CRT shaders",
+	         {{@"Even CRT scanlines",
 	           @"auto",
-	           @"CRT scanlines stay even",
+	           @"Whole steps for CRT shaders",
 	           @"Staging's default. A CRT shader shrinks the picture to a whole number of "
 	           @"pixels per line, leaving black bars, so its scanlines are even. Sharp pixels "
 	           @"still fill the screen."},
@@ -188,7 +227,10 @@ const std::vector<ConfSetting>& conf_settings()
 	           @"off",
 	           @"CRT scanlines may band",
 	           @"The picture fills the screen. At a size that doesn't divide the screen evenly, "
-	           @"a CRT shader's scanlines band."}}},
+	           @"a CRT shader's scanlines band."}},
+	         @"Staging's default: a CRT shader shrinks the picture to a whole number of pixels "
+	         @"per line, leaving black bars, so its scanlines are even. Sharp pixels still fill "
+	         @"the screen."},
 	};
 	return settings;
 }
@@ -591,15 +633,32 @@ UIAction* make_action(NSString* title, const bool is_on, void (^handler)())
 	return action;
 }
 
+// The narrowest screen that has room for two columns of settings, in points
+constexpr CGFloat TwoColumnWidth = 700;
+// The settings column's share of a wide screen; the touch controls get the rest
+constexpr CGFloat SettingsColumnShare = 0.6;
+
+// The width of the column a settings row is in
+CGFloat settings_column_width()
+{
+	const auto width = app_screen().bounds.size.width;
+	return width >= TwoColumnWidth ? width * SettingsColumnShare : width;
+}
+
 UIButton* make_menu_button(UIMenu* menu)
 {
 	auto config                    = UIButtonConfiguration.plainButtonConfiguration;
 	config.indicator               = UIButtonConfigurationIndicatorPopup;
+	config.titleLineBreakMode      = NSLineBreakByTruncatingTail;
 	auto button                    = [UIButton buttonWithConfiguration:config primaryAction:nil];
 	button.menu                    = menu;
 	button.showsMenuAsPrimaryAction = YES;
 	button.changesSelectionAsPrimaryAction = YES;
 	[button sizeToFit];
+	// A long title must not run into the row's own text or the next column
+	auto frame       = button.frame;
+	frame.size.width = std::min(frame.size.width, settings_column_width() / 2);
+	button.frame     = frame;
 	return button;
 }
 
@@ -1322,8 +1381,6 @@ constexpr NSInteger NameFieldTag = 1;
 enum ControlsRow { MouseRow, GameKeysRow, GamepadRow, FirstButtonRow };
 constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 
-// The narrowest screen that has room for two columns, in points
-constexpr CGFloat TwoColumnWidth = 700;
 
 - (instancetype)initWithGame:(NSString*)game
                     confPath:(NSString*)conf_path
@@ -1370,7 +1427,11 @@ constexpr CGFloat TwoColumnWidth = 700;
 	const auto is_wide = _game && bounds.size.width >= TwoColumnWidth;
 	if (is_wide) {
 		CGRect left = {}, right = {};
-		CGRectDivide(bounds, &left, &right, std::round(bounds.size.width / 2), CGRectMinXEdge);
+		CGRectDivide(bounds,
+		             &left,
+		             &right,
+		             std::round(bounds.size.width * SettingsColumnShare),
+		             CGRectMinXEdge);
 		_tableView.frame   = left;
 		_right_table.frame = right;
 	} else {
@@ -1627,12 +1688,14 @@ constexpr CGFloat TwoColumnWidth = 700;
 		const auto row = static_cast<size_t>(indexPath.row);
 		if (row == conf_settings().size() + ShaderRow) {
 			content.text              = @"Shader";
+			content.secondaryText     = [self shaderDetail];
 			cell.contentConfiguration = content;
 			cell.accessoryView        = [self shaderMenu];
 			return cell;
 		}
 		if (row == conf_settings().size() + MusicRow) {
 			content.text              = @"Music";
+			content.secondaryText     = [self musicDetail];
 			cell.contentConfiguration = content;
 			cell.accessoryView        = [self musicMenu];
 			return cell;
@@ -1693,18 +1756,101 @@ constexpr CGFloat TwoColumnWidth = 700;
 // The explanation of the choice in force: the game's, else the shared config's
 - (NSString*)detailForSetting:(const ConfSetting&)setting
 {
-	NSString* const key = setting.keys.firstObject;
-	NSString* const value = ReadConfValue(_conf_path, setting.section, key)
-	                                ?: ReadConfValue(@"dosbox.conf", setting.section, key);
-	if (!value) {
+	for (NSString* key in setting.keys) {
+		NSString* const value = ReadConfValue(_conf_path, setting.section, key)
+		                                ?: ReadConfValue(@"dosbox.conf", setting.section, key);
+		if (!value) {
+			continue;
+		}
+		for (const auto& choice : setting.choices) {
+			if ([choice.value caseInsensitiveCompare:value] == NSOrderedSame) {
+				return choice.detail;
+			}
+		}
+		return [key isEqualToString:@"vesa_custom_resolution"] ? size_detail(value, _conf_path)
+		                                                       : nil;
+	}
+	return setting.default_detail;
+}
+
+// The explanation under the Shader row, for the shader in force
+- (NSString*)shaderDetail
+{
+	NSString* const output = (ReadConfValue(_conf_path, @"sdl", @"output")
+	                                  ?: ReadConfValue(@"dosbox.conf", @"sdl", @"output"))
+	                                 .lowercaseString;
+	NSString* const shader = ReadConfValue(_conf_path, @"render", @"shader")
+	                                 ?: ReadConfValue(@"dosbox.conf", @"render", @"shader");
+	if (!output && !shader) {
 		return nil;
 	}
-	for (const auto& choice : setting.choices) {
-		if ([choice.value caseInsensitiveCompare:value] == NSOrderedSame) {
-			return choice.detail;
-		}
+	if ([output isEqualToString:SharpOutput] || !shader) {
+		return @"Sharp pixels: the fastest, with every pixel crisp.";
 	}
-	return [key isEqualToString:@"vesa_custom_resolution"] ? size_detail(value, _conf_path) : nil;
+	NSString* const name = shader.lowercaseString;
+	NSString* const what = [&]() -> NSString* {
+		if ([name isEqualToString:@"crt-auto"]) {
+			return @"Picks a monitor look to suit each video mode.";
+		}
+		if ([name isEqualToString:@"crt-auto-machine"]) {
+			return @"Picks the look of the emulated machine's own monitor for each video mode.";
+		}
+		if ([name hasPrefix:@"crt-auto-arcade"]) {
+			return @"Picks an arcade monitor look to suit each video mode.";
+		}
+		if ([name hasPrefix:@"crt/crt-hyllian"]) {
+			return @"A CRT monitor look with scanlines and glow.";
+		}
+		if ([name isEqualToString:@"crt/vga-1080p"]) {
+			return @"A light VGA monitor look for 2 pixels per line.";
+		}
+		if ([name isEqualToString:@"crt/vga-1080p-fake-double-scan"]) {
+			return @"A light VGA monitor look for 320x200 games on small screens.";
+		}
+		if ([name hasPrefix:@"interpolation/"]) {
+			return @"Smooth scaling without a monitor look.";
+		}
+		if ([name hasPrefix:@"scaler/"]) {
+			return @"A pixel-art scaler.";
+		}
+		return nil;
+	}();
+	NSString* const windows_size =
+	        _windows_dir ? (ReadConfValue(_conf_path, @"dosbox", @"vesa_custom_resolution")
+	                                ?: ReadConfValue(@"dosbox.conf", @"dosbox", @"vesa_custom_resolution"))
+	                     : nil;
+	NSString* const note = shader_subtitle(shader, windows_size, _conf_path);
+	if (what && note) {
+		return [NSString stringWithFormat:@"%@ %@.", what, note];
+	}
+	return what ?: (note ? [note stringByAppendingString:@"."] : nil);
+}
+
+// The explanation under the Music row, for the MIDI device in force
+- (NSString*)musicDetail
+{
+	NSString* const device = (ReadConfValue(_conf_path, @"midi", @"mididevice")
+	                                  ?: ReadConfValue(@"dosbox.conf", @"midi", @"mididevice"))
+	                                 .lowercaseString;
+	if ([device isEqualToString:@"fluidsynth"]) {
+		NSString* const soundfont = ReadConfValue(_conf_path, @"fluidsynth", @"soundfont")
+		                                    ?: ReadConfValue(@"dosbox.conf", @"fluidsynth", @"soundfont");
+		return soundfont ? [NSString stringWithFormat:@"MIDI music through FluidSynth with the "
+		                                               @"SoundFont %@.",
+		                                               soundfont.stringByDeletingPathExtension]
+		                 : @"MIDI music through FluidSynth with its own SoundFont.";
+	}
+	if ([device isEqualToString:@"mt32"]) {
+		return @"Roland MT-32 emulation, with the ROMs in the mt32-roms folder.";
+	}
+	if ([device isEqualToString:@"none"]) {
+		return @"No MIDI music. Sound effects still play.";
+	}
+	if (!device) {
+		return @"Staging's default sends MIDI to a port, and iOS has none, so there is no "
+		       @"music: choose FluidSynth or the MT-32.";
+	}
+	return nil;
 }
 
 - (UIButton*)menuForSetting:(const ConfSetting&)setting
