@@ -196,7 +196,8 @@ struct MixerSettings {
 
 	// Config-time flag from the `nosound` setting. If set, there is no SDL
 	// audio device and the mixer thread just sleeps for the expected
-	// per-block duration to simulate timing. Never changes after init.
+	// per-block duration to simulate timing. Only changes in MIXER_Init(),
+	// which resets it for each run of the emulator.
 	bool no_sound = false;
 
 	// Mute FSM (see `MixerMuteState` in mixer.h). When non-Audible,
@@ -3228,6 +3229,9 @@ void MIXER_Init()
 	fill_8to16_lut();
 
 	const auto requested_no_sound = section->GetBool("nosound");
+
+	// The previous run of the emulator may have left this set
+	mixer.no_sound = false;
 
 	auto set_no_sound = [&] {
 		assert(mixer.sdl_device == 0);
