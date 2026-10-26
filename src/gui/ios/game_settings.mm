@@ -135,7 +135,10 @@ NSString* rename_game(NSString* old_name, NSString* conf_path, NSString* new_nam
 struct Choice {
 	NSString* title;
 	NSString* value;
+	// The line under the title in the menu: short, the menu truncates it
 	NSString* subtitle = nil;
+	// The explanation under the setting's row while this is the choice
+	NSString* detail = nil;
 };
 
 struct ConfSetting {
@@ -172,14 +175,20 @@ const std::vector<ConfSetting>& conf_settings()
 	         @[@"integer_scaling"],
 	         {{@"Whole steps for CRT shaders",
 	           @"auto",
-	           @"Staging's default: CRT shaders shrink the picture to even scanlines, "
-	           @"leaving black bars; sharp pixels fill the screen"},
+	           @"CRT scanlines stay even",
+	           @"Staging's default. A CRT shader shrinks the picture to a whole number of "
+	           @"pixels per line, leaving black bars, so its scanlines are even. Sharp pixels "
+	           @"still fill the screen."},
 	          {@"Whole steps always",
 	           @"vertical",
-	           @"Every picture shrinks to a whole number of pixels per line"},
+	           @"Black bars, even pixels",
+	           @"Every picture shrinks to a whole number of pixels per line, leaving black "
+	           @"bars."},
 	          {@"Fill the screen",
 	           @"off",
-	           @"CRT scanlines band at sizes that don't divide the screen evenly"}}},
+	           @"CRT scanlines may band",
+	           @"The picture fills the screen. At a size that doesn't divide the screen evenly, "
+	           @"a CRT shader's scanlines band."}}},
 	};
 	return settings;
 }
@@ -367,13 +376,18 @@ ScanlineAdvice scanline_advice(NSString* size, NSString* conf_path)
 	return advice;
 }
 
+// Whole numbers as such, and enough decimals that a near miss (2.003, which
+// bands) doesn't read as a whole number
 NSString* pixels_text(const double value)
 {
-	return is_whole(value) ? [NSString stringWithFormat:@"%d", static_cast<int>(std::lround(value))]
-	                       : [NSString stringWithFormat:@"%.2f", value];
+	if (is_whole(value)) {
+		return [NSString stringWithFormat:@"%d", static_cast<int>(std::lround(value))];
+	}
+	const auto near_whole = std::abs(value - std::round(value)) < 0.005;
+	return [NSString stringWithFormat:near_whole ? @"%.3f" : @"%.2f", value];
 }
 
-// A screen size's note in the Screen size menu
+// A screen size's line in the Screen size menu: short, the menu truncates it
 NSString* size_subtitle(NSString* size, NSString* conf_path)
 {
 	const auto advice = scanline_advice(size, conf_path);
@@ -383,14 +397,63 @@ NSString* size_subtitle(NSString* size, NSString* conf_path)
 	NSString* const pixels = [NSString stringWithFormat:@"%@ px per line",
 	                                                    pixels_text(advice.pixels_per_line)];
 	if (!advice.auto_shader) {
-		return [pixels stringByAppendingString:@": too fine for CRT shaders"];
+		return [pixels stringByAppendingString:@", no CRT shader"];
 	}
-	NSString* const crt = !advice.even ? @"CRT shaders band"
-	                    : advice.bars_percent > 0
-	                            ? [NSString stringWithFormat:@"CRT shaders even, %d%% black bars",
-	                                                         advice.bars_percent]
-	                            : @"CRT shaders even";
-	return [NSString stringWithFormat:@"%@: %@ (Auto CRT: %@)", pixels, crt, advice.auto_shader];
+	if (!advice.even) {
+		return [pixels stringByAppendingString:@", CRT bands"];
+	}
+	if (advice.bars_percent > 0) {
+		return [NSString stringWithFormat:@"%@, CRT %d%% bars", pixels, advice.bars_percent];
+	}
+	return [pixels stringByAppendingString:@", CRT even"];
+}
+
+NSArray<NSString*>* whole_pixel_sizes();
+
+// The explanation under the Screen size row for the size in use
+NSString* size_detail(NSString* size, NSString* conf_path)
+{
+	const auto advice = scanline_advice(size, conf_path);
+	if (advice.pixels_per_line <= 0) {
+		return nil;
+	}
+	NSString* const gives = [NSString stringWithFormat:@"%@ gives %@ pixels per line on this screen",
+	                                                   size,
+	                                                   pixels_text(advice.pixels_per_line)];
+	if (!advice.auto_shader) {
+		return [gives stringByAppendingString:
+		                      @", too few for a CRT shader: Auto CRT shows sharp pixels."];
+	}
+	if (advice.even && advice.bars_percent > 0) {
+		return [NSString stringWithFormat:
+		                         @"%@. Auto CRT picks %@, shrinking the picture to %@x with "
+		                         @"%d%% black bars so the scanlines are even.",
+		                         gives,
+		                         advice.auto_shader,
+		                         pixels_text(advice.scale),
+		                         advice.bars_percent];
+	}
+	if (advice.even) {
+		return [NSString stringWithFormat:@"%@. Auto CRT picks %@ and its scanlines land evenly.",
+		                                  gives,
+		                                  advice.auto_shader];
+	}
+	auto even_sizes = [NSMutableArray<NSString*> array];
+	for (NSString* candidate in whole_pixel_sizes()) {
+		if (scanline_advice(candidate, conf_path).even) {
+			[even_sizes addObject:candidate];
+		}
+	}
+	NSString* const note = [NSString stringWithFormat:@"%@. Auto CRT picks %@ and its scanlines "
+	                                                  @"band.",
+	                                                  gives,
+	                                                  advice.auto_shader];
+	if (even_sizes.count == 0) {
+		return note;
+	}
+	return [NSString stringWithFormat:@"%@ Even on this screen: %@.",
+	                                  note,
+	                                  [even_sizes componentsJoinedByString:@", "]];
 }
 
 // A shader's note in the Shader menu, for a game with a Windows screen size
@@ -406,17 +469,15 @@ NSString* shader_subtitle(NSString* shader_name, NSString* windows_size, NSStrin
 	if (advice.pixels_per_line <= 0) {
 		return nil;
 	}
-	NSString* const gives = [NSString stringWithFormat:@"%@ gives %@ px per line",
-	                                                   windows_size,
-	                                                   pixels_text(advice.pixels_per_line)];
+	NSString* const pixels = pixels_text(advice.pixels_per_line);
 	if ([shader_name isEqualToString:@"crt-auto"]) {
 		if (!advice.auto_shader) {
-			return [gives stringByAppendingString:@": sharp pixels"];
+			return [NSString stringWithFormat:@"Sharp pixels at %@", windows_size];
 		}
-		return [NSString stringWithFormat:@"%@: %@, %@ scanlines",
-		                                  gives,
+		return [NSString stringWithFormat:@"%@ at %@, %@",
 		                                  advice.auto_shader,
-		                                  advice.even ? @"even" : @"uneven"];
+		                                  windows_size,
+		                                  advice.even ? @"even" : @"bands"];
 	}
 	// The preset names say how many pixels per line they were made for
 	const auto needed = [&] {
@@ -436,15 +497,13 @@ NSString* shader_subtitle(NSString* shader_name, NSString* windows_size, NSStrin
 	}
 	const auto is_vga_1080p = [shader_name isEqualToString:@"crt/vga-1080p"];
 	if (advice.pixels_per_line < needed) {
-		return [NSString stringWithFormat:@"Made for %d px per line; %@", needed, gives];
+		return [NSString stringWithFormat:@"Needs %d px per line, has %@", needed, pixels];
 	}
 	if (!even_scanlines(advice.scale, is_vga_1080p)) {
-		return [gives stringByAppendingString:@": scanlines band"];
+		return [NSString stringWithFormat:@"Bands at %@ px per line", pixels];
 	}
 	if (advice.bars_percent > 0) {
-		return [NSString stringWithFormat:@"Even at %@, %d%% black bars",
-		                                  windows_size,
-		                                  advice.bars_percent];
+		return [NSString stringWithFormat:@"Even at %@, %d%% bars", windows_size, advice.bars_percent];
 	}
 	return [NSString stringWithFormat:@"Even at %@", windows_size];
 }
@@ -499,7 +558,8 @@ ConfSetting screen_size_setting(NSString* conf_path)
 	auto setting    = ConfSetting{@"Screen size", @"dosbox", @[@"vesa_custom_resolution"], {}};
 	setting.choices = {{[NSString stringWithFormat:@"Fit the screen (%@, %@)", fit, aspect_ratio(fit)],
 	                    fit,
-	                    size_subtitle(fit, conf_path)}};
+	                    size_subtitle(fit, conf_path),
+	                    size_detail(fit, conf_path)}};
 
 	auto sizes = [NSMutableOrderedSet<NSString*> orderedSetWithArray:whole_pixel_sizes()];
 	[sizes addObjectsFromArray:@[@"1280x960", @"1024x768", @"800x600", @"640x480"]];
@@ -513,7 +573,8 @@ ConfSetting screen_size_setting(NSString* conf_path)
 	for (NSString* size in sizes) {
 		setting.choices.push_back({[NSString stringWithFormat:@"%@ (%@)", size, aspect_ratio(size)],
 		                           size,
-		                           size_subtitle(size, conf_path)});
+		                           size_subtitle(size, conf_path),
+		                           size_detail(size, conf_path)});
 	}
 	return setting;
 }
@@ -1578,6 +1639,7 @@ constexpr CGFloat TwoColumnWidth = 700;
 		}
 		const auto& setting       = conf_settings()[row];
 		content.text              = setting.title;
+		content.secondaryText     = [self detailForSetting:setting];
 		cell.contentConfiguration = content;
 		cell.accessoryView        = [self menuForSetting:setting];
 		return cell;
@@ -1586,6 +1648,7 @@ constexpr CGFloat TwoColumnWidth = 700;
 		if (indexPath.row == 0 && UsesVbeSvga(_windows_dir)) {
 			const auto setting        = screen_size_setting(_conf_path);
 			content.text              = setting.title;
+			content.secondaryText     = [self detailForSetting:setting];
 			cell.contentConfiguration = content;
 			cell.accessoryView        = [self menuForSetting:setting];
 			return cell;
@@ -1627,6 +1690,23 @@ constexpr CGFloat TwoColumnWidth = 700;
 	return cell;
 }
 
+// The explanation of the choice in force: the game's, else the shared config's
+- (NSString*)detailForSetting:(const ConfSetting&)setting
+{
+	NSString* const key = setting.keys.firstObject;
+	NSString* const value = ReadConfValue(_conf_path, setting.section, key)
+	                                ?: ReadConfValue(@"dosbox.conf", setting.section, key);
+	if (!value) {
+		return nil;
+	}
+	for (const auto& choice : setting.choices) {
+		if ([choice.value caseInsensitiveCompare:value] == NSOrderedSame) {
+			return choice.detail;
+		}
+	}
+	return [key isEqualToString:@"vesa_custom_resolution"] ? size_detail(value, _conf_path) : nil;
+}
+
 - (UIButton*)menuForSetting:(const ConfSetting&)setting
 {
 	NSString* const current = ReadConfValue(_conf_path, setting.section, setting.keys.firstObject);
@@ -1643,7 +1723,8 @@ constexpr CGFloat TwoColumnWidth = 700;
 		const auto ratio   = is_size ? aspect_ratio(current) : nil;
 		choices.push_back({ratio ? [NSString stringWithFormat:@"%@ (%@)", current, ratio] : current,
 		                   current,
-		                   is_size ? size_subtitle(current, _conf_path) : nil});
+		                   is_size ? size_subtitle(current, _conf_path) : nil,
+		                   is_size ? size_detail(current, _conf_path) : nil});
 	}
 
 	auto actions = [NSMutableArray<UIMenuElement*> array];
