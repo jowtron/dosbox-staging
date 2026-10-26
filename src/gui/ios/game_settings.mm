@@ -135,6 +135,7 @@ NSString* rename_game(NSString* old_name, NSString* conf_path, NSString* new_nam
 struct Choice {
 	NSString* title;
 	NSString* value;
+	NSString* subtitle = nil;
 };
 
 struct ConfSetting {
@@ -243,29 +244,196 @@ NSArray<NSString*>* find_crt_presets()
 // Windows' text readable: 1264x584 on an iPhone 14, 1920x1440 on a 12.9"
 // iPad Pro. Staging's custom VESA mode is at most 1920x1440, with the width
 // a multiple of 8.
-NSString* fit_screen_size()
+// Staging's largest custom VESA mode
+constexpr double MaxCustomWidth  = 1920;
+constexpr double MaxCustomHeight = 1440;
+
+UIScreen* app_screen()
 {
-	CGSize screen = {1024, 768};
 	for (UIScene* scene in UIApplication.sharedApplication.connectedScenes) {
 		if ([scene isKindOfClass:UIWindowScene.class]) {
-			screen = static_cast<UIWindowScene*>(scene).screen.bounds.size;
-			break;
+			return static_cast<UIWindowScene*>(scene).screen;
 		}
 	}
+	return UIScreen.mainScreen;
+}
+
+// The screen's size in pixels, landscape
+CGSize screen_pixel_size()
+{
+	const auto bounds = app_screen().nativeBounds.size;
+	return {std::max(bounds.width, bounds.height), std::min(bounds.width, bounds.height)};
+}
+
+NSString* fit_screen_size()
+{
+	const auto screen = app_screen().bounds.size;
+
 	constexpr double PixelsPerPoint = 1.5;
-	constexpr double MaxWidth       = 1920;
-	constexpr double MaxHeight      = 1440;
 
 	const auto width  = std::max(screen.width, screen.height) * PixelsPerPoint;
 	const auto height = std::min(screen.width, screen.height) * PixelsPerPoint;
-	const auto scale  = std::min({1.0, MaxWidth / width, MaxHeight / height});
+	const auto scale  = std::min({1.0, MaxCustomWidth / width, MaxCustomHeight / height});
 
 	const auto round_to_8 = [](const double value) {
 		return static_cast<int>(std::lround(value / 8)) * 8;
 	};
 	return [NSString stringWithFormat:@"%dx%d",
-	                                  std::min(round_to_8(width * scale), static_cast<int>(MaxWidth)),
-	                                  std::min(round_to_8(height * scale), static_cast<int>(MaxHeight))];
+	                                  std::min(round_to_8(width * scale), static_cast<int>(MaxCustomWidth)),
+	                                  std::min(round_to_8(height * scale), static_cast<int>(MaxCustomHeight))];
+}
+
+// What CRT shaders make of a Windows screen size on this screen. Staging's
+// Auto CRT picks a preset from the screen pixels per emulated line
+// (auto_shader_switcher.cpp): 4 or more give vga-4k, 3 vga-1440p, 2 vga-1080p
+// and fewer show sharp pixels. crt/vga-1080p darkens every second pixel row,
+// so it only looks even at exactly 2 pixels per line; the hyllian presets look
+// even at whole numbers, at 3.5 and 4.5, and above 5. Anything else makes the
+// scanlines beat against the pixel grid (banding). With 'integer_scaling' at
+// 'auto' or 'vertical', Staging shrinks a CRT-shaded picture to the nearest
+// such step and leaves black bars instead.
+struct ScanlineAdvice {
+	double pixels_per_line = 0; // 0 when the size can't be read
+	double scale           = 0; // after integer scaling, if any
+	NSString* auto_shader  = nil; // nil: Auto CRT shows sharp pixels
+	bool even              = false; // for Auto CRT's choice
+	int bars_percent       = 0; // of the height, when integer scaling shrinks it
+};
+
+constexpr double ScaleTolerance = 0.001;
+
+bool is_whole(const double value)
+{
+	return std::abs(value - std::round(value)) < ScaleTolerance;
+}
+
+// Whether a CRT shader's scanlines land evenly at this scale
+bool even_scanlines(const double scale, const bool is_vga_1080p)
+{
+	if (is_vga_1080p) {
+		return std::abs(scale - 2) < ScaleTolerance;
+	}
+	return is_whole(scale) || (scale >= 3 && is_whole(scale * 2)) || scale >= 5;
+}
+
+ScanlineAdvice scanline_advice(NSString* size, NSString* conf_path)
+{
+	const auto parts = [size.lowercaseString componentsSeparatedByString:@"x"];
+	if (parts.count != 2 || parts[0].intValue <= 0 || parts[1].intValue <= 0) {
+		return {};
+	}
+	const auto screen = screen_pixel_size();
+	const auto height = parts[1].doubleValue;
+
+	ScanlineAdvice advice  = {};
+	advice.pixels_per_line = std::min(screen.width / parts[0].doubleValue,
+	                                  screen.height / height);
+	const auto pixels = advice.pixels_per_line;
+	advice.scale      = pixels;
+	if (pixels < 2) {
+		return advice;
+	}
+	advice.auto_shader = pixels >= 4 ? @"vga-4k" : pixels >= 3 ? @"vga-1440p" : @"vga-1080p";
+
+	NSString* const integer_scaling =
+	        (ReadConfValue(conf_path, @"render", @"integer_scaling")
+	                 ?: ReadConfValue(@"dosbox.conf", @"render", @"integer_scaling") ?: @"auto")
+	                .lowercaseString;
+	if ([integer_scaling isEqualToString:@"vertical"]) {
+		advice.scale = std::floor(pixels);
+	} else if ([integer_scaling isEqualToString:@"auto"]) {
+		// Staging's handle_auto_mode(): whole steps below 3, half steps
+		// from 3 to 5, no constraint above 5
+		advice.scale = pixels >= 5   ? pixels
+		             : pixels >= 3 ? std::floor(pixels * 2) / 2
+		                           : std::floor(pixels);
+	}
+	advice.even = even_scanlines(advice.scale, [advice.auto_shader isEqualToString:@"vga-1080p"]);
+	advice.bars_percent = static_cast<int>(
+	        std::lround((1 - advice.scale * height / screen.height) * 100));
+	return advice;
+}
+
+NSString* pixels_text(const double value)
+{
+	return is_whole(value) ? [NSString stringWithFormat:@"%d", static_cast<int>(std::lround(value))]
+	                       : [NSString stringWithFormat:@"%.2f", value];
+}
+
+// A screen size's note in the Screen size menu
+NSString* size_subtitle(NSString* size, NSString* conf_path)
+{
+	const auto advice = scanline_advice(size, conf_path);
+	if (advice.pixels_per_line <= 0) {
+		return nil;
+	}
+	NSString* const pixels = [NSString stringWithFormat:@"%@ px per line",
+	                                                    pixels_text(advice.pixels_per_line)];
+	if (!advice.auto_shader) {
+		return [pixels stringByAppendingString:@": too fine for CRT shaders"];
+	}
+	NSString* const crt = !advice.even ? @"CRT shaders band"
+	                    : advice.bars_percent > 0
+	                            ? [NSString stringWithFormat:@"CRT shaders even, %d%% black bars",
+	                                                         advice.bars_percent]
+	                            : @"CRT shaders even";
+	return [NSString stringWithFormat:@"%@: %@ (Auto CRT: %@)", pixels, crt, advice.auto_shader];
+}
+
+// A shader's note in the Shader menu, for a game with a Windows screen size
+NSString* shader_subtitle(NSString* shader_name, NSString* windows_size, NSString* conf_path)
+{
+	if (!windows_size) {
+		return nil;
+	}
+	if ([shader_name isEqualToString:@"crt/vga-1080p-fake-double-scan"]) {
+		return @"For 320x200 games";
+	}
+	const auto advice = scanline_advice(windows_size, conf_path);
+	if (advice.pixels_per_line <= 0) {
+		return nil;
+	}
+	NSString* const gives = [NSString stringWithFormat:@"%@ gives %@ px per line",
+	                                                   windows_size,
+	                                                   pixels_text(advice.pixels_per_line)];
+	if ([shader_name isEqualToString:@"crt-auto"]) {
+		if (!advice.auto_shader) {
+			return [gives stringByAppendingString:@": sharp pixels"];
+		}
+		return [NSString stringWithFormat:@"%@: %@, %@ scanlines",
+		                                  gives,
+		                                  advice.auto_shader,
+		                                  advice.even ? @"even" : @"uneven"];
+	}
+	// The preset names say how many pixels per line they were made for
+	const auto needed = [&] {
+		if ([shader_name hasSuffix:@"-4k"]) {
+			return 4;
+		}
+		if ([shader_name hasSuffix:@"-1440p"] || [shader_name hasSuffix:@"-720p"]) {
+			return 3;
+		}
+		if ([shader_name hasSuffix:@"-1080p"]) {
+			return 2;
+		}
+		return 0;
+	}();
+	if (needed == 0) {
+		return nil;
+	}
+	const auto is_vga_1080p = [shader_name isEqualToString:@"crt/vga-1080p"];
+	if (advice.pixels_per_line < needed) {
+		return [NSString stringWithFormat:@"Made for %d px per line; %@", needed, gives];
+	}
+	if (!even_scanlines(advice.scale, is_vga_1080p)) {
+		return [gives stringByAppendingString:@": scanlines band"];
+	}
+	if (advice.bars_percent > 0) {
+		return [NSString stringWithFormat:@"Even at %@, %d%% black bars",
+		                                  windows_size,
+		                                  advice.bars_percent];
+	}
+	return [NSString stringWithFormat:@"Even at %@", windows_size];
 }
 
 // A size's aspect ratio: the familiar form, such as 4:3, when there is one,
@@ -288,17 +456,51 @@ NSString* aspect_ratio(NSString* size)
 	return [NSString stringWithFormat:@"%.2f:1", static_cast<double>(width) / height];
 }
 
-ConfSetting screen_size_setting()
+// The sizes with a whole number of screen pixels per line (2, 3, 4...), for
+// even CRT scanlines, with the width rounded down to a multiple of 8
+NSArray<NSString*>* whole_pixel_sizes()
 {
-	const auto fit   = fit_screen_size();
-	auto setting     = ConfSetting{@"Screen size", @"dosbox", @[@"vesa_custom_resolution"], {}};
-	setting.choices  = {{[NSString stringWithFormat:@"Fit the screen (%@, %@)", fit, aspect_ratio(fit)],
-	                     fit}};
-	for (NSString* size in @[@"640x480", @"800x600", @"1024x768", @"1280x960"]) {
-		if (![size isEqualToString:fit]) {
-			setting.choices.push_back(
-			        {[NSString stringWithFormat:@"%@ (%@)", size, aspect_ratio(size)], size});
+	constexpr int MinWidth = 640; // narrower is for DOS games, not a desktop
+	const auto screen      = screen_pixel_size();
+
+	auto sizes = [NSMutableArray<NSString*> array];
+	for (int pixels_per_line = 2;; ++pixels_per_line) {
+		const auto height = static_cast<int>(screen.height / pixels_per_line);
+		const auto width  = static_cast<int>(std::min(height * screen.width / screen.height,
+		                                              screen.width / pixels_per_line) /
+		                                     8) *
+		                    8;
+		if (width < MinWidth) {
+			break;
 		}
+		if (width <= MaxCustomWidth && height <= MaxCustomHeight) {
+			[sizes addObject:[NSString stringWithFormat:@"%dx%d", width, height]];
+		}
+	}
+	return sizes;
+}
+
+ConfSetting screen_size_setting(NSString* conf_path)
+{
+	const auto fit  = fit_screen_size();
+	auto setting    = ConfSetting{@"Screen size", @"dosbox", @[@"vesa_custom_resolution"], {}};
+	setting.choices = {{[NSString stringWithFormat:@"Fit the screen (%@, %@)", fit, aspect_ratio(fit)],
+	                    fit,
+	                    size_subtitle(fit, conf_path)}};
+
+	auto sizes = [NSMutableOrderedSet<NSString*> orderedSetWithArray:whole_pixel_sizes()];
+	[sizes addObjectsFromArray:@[@"1280x960", @"1024x768", @"800x600", @"640x480"]];
+	[sizes removeObject:fit];
+	const auto height_of = [](NSString* size) {
+		return [size componentsSeparatedByString:@"x"].lastObject.intValue;
+	};
+	[sizes sortUsingComparator:^(NSString* a, NSString* b) {
+		return [@(height_of(b)) compare:@(height_of(a))];
+	}];
+	for (NSString* size in sizes) {
+		setting.choices.push_back({[NSString stringWithFormat:@"%@ (%@)", size, aspect_ratio(size)],
+		                           size,
+		                           size_subtitle(size, conf_path)});
 	}
 	return setting;
 }
@@ -1369,7 +1571,7 @@ constexpr CGFloat TwoColumnWidth = 700;
 	}
 	case WindowsSection: {
 		if (indexPath.row == 0 && UsesVbeSvga(_windows_dir)) {
-			const auto setting        = screen_size_setting();
+			const auto setting        = screen_size_setting(_conf_path);
 			content.text              = setting.title;
 			cell.contentConfiguration = content;
 			cell.accessoryView        = [self menuForSetting:setting];
@@ -1424,11 +1626,11 @@ constexpr CGFloat TwoColumnWidth = 700;
 		return [c.value isEqualToString:current];
 	});
 	if (current && !is_known) {
-		const auto ratio = [setting.keys.firstObject isEqualToString:@"vesa_custom_resolution"]
-		                         ? aspect_ratio(current)
-		                         : nil;
-		choices.push_back(
-		        {ratio ? [NSString stringWithFormat:@"%@ (%@)", current, ratio] : current, current});
+		const auto is_size = [setting.keys.firstObject isEqualToString:@"vesa_custom_resolution"];
+		const auto ratio   = is_size ? aspect_ratio(current) : nil;
+		choices.push_back({ratio ? [NSString stringWithFormat:@"%@ (%@)", current, ratio] : current,
+		                   current,
+		                   is_size ? size_subtitle(current, _conf_path) : nil});
 	}
 
 	auto actions = [NSMutableArray<UIMenuElement*> array];
@@ -1450,7 +1652,8 @@ constexpr CGFloat TwoColumnWidth = 700;
 		                                }];
 		const auto is_current = (value == nil) ? (current == nil)
 		                                       : [value isEqualToString:current];
-		action.state = is_current ? UIMenuElementStateOn : UIMenuElementStateOff;
+		action.state    = is_current ? UIMenuElementStateOn : UIMenuElementStateOff;
+		action.subtitle = choice.subtitle;
 		[actions addObject:action];
 	}
 	return make_menu_button([UIMenu menuWithChildren:actions]);
@@ -1472,10 +1675,17 @@ constexpr CGFloat TwoColumnWidth = 700;
 			[weak_self confChanged];
 		};
 	};
+	// A Windows game's screen size says how each CRT shader will look
+	NSString* const windows_size =
+	        _windows_dir ? (ReadConfValue(conf_path, @"dosbox", @"vesa_custom_resolution")
+	                                ?: ReadConfValue(@"dosbox.conf", @"dosbox", @"vesa_custom_resolution"))
+	                     : nil;
 	const auto shader_action = ^(NSString* title, NSString* name) {
-		return make_action(title,
-		                   !is_sharp && [shader caseInsensitiveCompare:name] == NSOrderedSame,
-		                   choose(GpuOutput, name));
+		auto action = make_action(title,
+		                          !is_sharp && [shader caseInsensitiveCompare:name] == NSOrderedSame,
+		                          choose(GpuOutput, name));
+		action.subtitle = shader_subtitle(name, windows_size, conf_path);
+		return action;
 	};
 	const auto submenu = ^(NSString* title, NSArray<UIMenuElement*>* children) {
 		return [UIMenu menuWithTitle:title image:nil identifier:nil options:0 children:children];
