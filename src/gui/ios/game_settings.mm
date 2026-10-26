@@ -1506,14 +1506,17 @@ constexpr CGFloat TwoColumnWidth = 700;
 		[presets addObject:shader_action(preset, name)];
 		[known addObject:name.lowercaseString];
 	}
-	if (presets.count > 0) {
-		[items addObject:submenu(@"CRT presets", presets)];
-	}
-
+	// The bundle's other CRT shaders (vga-1080p and its fake double scan
+	// variant) belong with the presets; the bare crt-hyllian doesn't
 	auto others = [NSMutableArray<UIMenuElement*> array];
 	for (NSString* name in find_shaders(bundled_resource(@"shaders"))) {
-		[others addObject:shader_action(name.lastPathComponent, name)];
+		const auto is_crt = [name hasPrefix:@"crt/"] &&
+		                    ![name isEqualToString:@"crt/crt-hyllian"];
+		[is_crt ? presets : others addObject:shader_action(name.lastPathComponent, name)];
 		[known addObject:name.lowercaseString];
+	}
+	if (presets.count > 0) {
+		[items addObject:submenu(@"CRT presets", presets)];
 	}
 	if (others.count > 0) {
 		[items addObject:submenu(@"Other shaders", others)];
