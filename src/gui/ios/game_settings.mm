@@ -1476,15 +1476,16 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 // they bring a button to restart it
 - (void)confChanged
 {
-	if (![self isRunning] || _needs_restart) {
-		return;
+	if ([self isRunning] && !_needs_restart) {
+		_needs_restart = true;
+		self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
+		        initWithTitle:@"Restart Game"
+		                style:UIBarButtonItemStylePlain
+		               target:self
+		               action:@selector(confirmRestart)];
 	}
-	_needs_restart = true;
-	self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
-	        initWithTitle:@"Restart Game"
-	                style:UIBarButtonItemStylePlain
-	               target:self
-	               action:@selector(confirmRestart)];
+	// The rows' descriptions and the shader menu's notes depend on the
+	// new value (the screen size's, in particular)
 	[self reloadTables];
 }
 
