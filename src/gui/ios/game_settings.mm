@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <numeric>
 #include <optional>
+#include <utility>
 #include <vector>
 
 NSString* const GameSettingsChangedNotification = @"DBGameSettingsChanged";
@@ -550,8 +551,9 @@ NSString* shader_subtitle(NSString* shader_name, NSString* windows_size, NSStrin
 	return [NSString stringWithFormat:@"Even at %@", windows_size];
 }
 
-// A size's aspect ratio: the familiar form, such as 4:3, when there is one,
-// otherwise to two decimal places, such as 2.16:1
+// A size's aspect ratio: the familiar form, such as 4:3, when there is one
+// (or it is within a percent of one, as 1360x1024 and 904x682 are, since
+// widths are rounded to multiples of 8), otherwise to two decimal places, such as 2.16:1
 NSString* aspect_ratio(NSString* size)
 {
 	const auto parts = [size.lowercaseString componentsSeparatedByString:@"x"];
@@ -562,6 +564,14 @@ NSString* aspect_ratio(NSString* size)
 	const auto height = parts[1].intValue;
 	if (width <= 0 || height <= 0) {
 		return nil;
+	}
+	constexpr std::pair<int, int> familiar_ratios[] = {
+	        {4, 3}, {5, 4}, {3, 2}, {16, 10}, {16, 9}};
+	const auto ratio = static_cast<double>(width) / height;
+	for (const auto& [a, b] : familiar_ratios) {
+		if (std::abs(ratio / (static_cast<double>(a) / b) - 1.0) < 0.01) {
+			return [NSString stringWithFormat:@"%d:%d", a, b];
+		}
 	}
 	const auto divisor = std::gcd(width, height);
 	if (width / divisor <= 21 && height / divisor <= 21) {
