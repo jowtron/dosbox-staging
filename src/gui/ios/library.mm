@@ -10,6 +10,7 @@
 
 #include "dosbox.h"
 
+#import <GameController/GameController.h>
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -629,12 +630,23 @@ static UICollectionViewLayout* make_library_layout()
 	background.cornerRadius = 12;
 	cell.backgroundConfiguration = background;
 
-	// The (i) button opens the game's settings
+	// The (i) button opens the game's settings. Our own button rather than
+	// the system detail accessory, whose small target made taps beside the
+	// symbol start the game instead
 	__weak DBLibraryViewController* weak_self = self;
-	auto info          = [[UICellAccessoryDetail alloc] init];
-	info.actionHandler = ^{
-		[weak_self showSettings:name];
-	};
+	auto button        = [UIButton buttonWithType:UIButtonTypeSystem];
+	auto config        = UIButtonConfiguration.plainButtonConfiguration;
+	config.image       = [UIImage systemImageNamed:@"info.circle"];
+	config.preferredSymbolConfigurationForImage =
+	        [UIImageSymbolConfiguration configurationWithPointSize:24];
+	config.contentInsets = NSDirectionalEdgeInsetsMake(14, 28, 14, 20);
+	button.configuration = config;
+	[button addAction:[UIAction actionWithHandler:^(UIAction*) {
+		        [weak_self showSettings:name];
+	        }]
+	        forControlEvents:UIControlEventTouchUpInside];
+	auto info = [[UICellAccessoryCustomView alloc] initWithCustomView:button
+	                                                        placement:UICellAccessoryPlacementTrailing];
 	cell.accessories = @[info];
 	return cell;
 }
@@ -649,9 +661,15 @@ static UICollectionViewLayout* make_library_layout()
 - (void)showSettings:(NSString*)name
 {
 	__weak DBLibraryViewController* weak_self = self;
-	auto settings = MakeGameSettingsController(name, self.games[name], ^(NSString*) {
-		[weak_self reload];
-	});
+	auto settings = MakeGameSettingsController(
+	        name,
+	        self.games[name],
+	        ^(NSString*) {
+		        [weak_self reload];
+	        },
+	        ^(NSString* game) {
+		        weak_self.chosenGame = game;
+	        });
 	[self.navigationController pushViewController:settings animated:YES];
 }
 
@@ -834,6 +852,12 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 		args.insert(args.end(), {"--set", setting});
 	}
 	args.insert(args.end(), {"--set", PresentationSetting()});
+	// A game's Keyboard setting remaps keys for an attached keyboard; it
+	// would catch the on-screen keyboard's keys too, so without one the
+	// mapper keeps its defaults. Test hook: DOSPAD_KEYBOARD=1 counts as one.
+	if (!GCKeyboard.coalescedKeyboard && !std::getenv("DOSPAD_KEYBOARD")) {
+		args.insert(args.end(), {"--set", "sdl mapperfile="});
+	}
 	return args;
 }
 

@@ -234,6 +234,16 @@ const std::vector<ConfSetting>& conf_settings()
 	         @"Staging's default: a CRT shader shrinks the picture to a whole number of pixels "
 	         @"per line, leaving black bars, so its scanlines are even. Sharp pixels still fill "
 	         @"the screen."},
+	        {@"Keyboard",
+	         @"sdl",
+	         @[@"mapperfile"],
+	         {{@"Numpad on 7 8 9, U I O, J K L",
+	           @"numpad-789-uio-jkl.map",
+	           @"For an attached keyboard",
+	           @"On an attached keyboard, 7 8 9, U I O and J K L act as the numpad's block of "
+	           @"nine, for games that move with the numpad; they no longer type. Without a "
+	           @"keyboard attached at launch, every key is itself."}},
+	         @"Staging's default: every key is itself."},
 	};
 	return settings;
 }
@@ -1417,6 +1427,7 @@ enum KeysSection { KeySetSection, KeyListSection, KeysSectionCount };
 	NSString* _game;
 	NSString* _conf_path;
 	void (^_on_rename)(NSString*);
+	void (^_on_play)(NSString*);
 
 	// The game's Windows, if it's a Windows game
 	NSString* _windows_dir;
@@ -1449,12 +1460,14 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 - (instancetype)initWithGame:(NSString*)game
                     confPath:(NSString*)conf_path
                     onRename:(void (^)(NSString*))on_rename
+                      onPlay:(void (^)(NSString*))on_play
 {
 	self = [super initWithNibName:nil bundle:nil];
 	if (self) {
 		_game      = game;
 		_conf_path = conf_path;
 		_on_rename = on_rename;
+		_on_play   = on_play;
 		self.title = game ? @"Game Settings" : @"Settings";
 
 		_windows_dir = game ? FindGameWindows(conf_path) : nil;
@@ -1572,6 +1585,12 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 		        initWithBarButtonSystemItem:UIBarButtonSystemItemDone
 		                             target:self
 		                             action:@selector(close)];
+	} else if (_on_play) {
+		// From the library, the game can start from here
+		self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+		        initWithBarButtonSystemItem:UIBarButtonSystemItemPlay
+		                             target:self
+		                             action:@selector(play)];
 	}
 
 	// A gamepad button's default follows the stick
@@ -1611,6 +1630,12 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 {
 	[self.view endEditing:YES];
 	[self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)play
+{
+	[self.view endEditing:YES];
+	_on_play(_game);
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView
@@ -2415,11 +2440,13 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 @end
 
 UIViewController* MakeGameSettingsController(NSString* game, NSString* conf_path,
-                                             void (^on_rename)(NSString* new_name))
+                                             void (^on_rename)(NSString* new_name),
+                                             void (^on_play)(NSString* name))
 {
 	return [[DBGameSettingsViewController alloc] initWithGame:game
 	                                                 confPath:conf_path
-	                                                 onRename:on_rename];
+	                                                 onRename:on_rename
+	                                                   onPlay:on_play];
 }
 
 UIViewController* MakeSharedSettingsController()
@@ -2429,5 +2456,8 @@ UIViewController* MakeSharedSettingsController()
 	if (![NSFileManager.defaultManager fileExistsAtPath:conf_path]) {
 		[NSFileManager.defaultManager createFileAtPath:conf_path contents:[NSData data] attributes:nil];
 	}
-	return [[DBGameSettingsViewController alloc] initWithGame:nil confPath:conf_path onRename:nil];
+	return [[DBGameSettingsViewController alloc] initWithGame:nil
+	                                                 confPath:conf_path
+	                                                 onRename:nil
+	                                                   onPlay:nil];
 }

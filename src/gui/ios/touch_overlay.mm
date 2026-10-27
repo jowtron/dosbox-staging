@@ -1495,7 +1495,7 @@ void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
 
 - (void)showGameSettings
 {
-	auto settings = MakeGameSettingsController(CurrentGameName(), CurrentGameConfPath(), nil);
+	auto settings = MakeGameSettingsController(CurrentGameName(), CurrentGameConfPath(), nil, nil);
 	auto navigation = [[UINavigationController alloc] initWithRootViewController:settings];
 	navigation.modalPresentationStyle = UIModalPresentationFormSheet;
 	// On an iPad, wide enough for the settings' two columns

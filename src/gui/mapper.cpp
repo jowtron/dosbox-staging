@@ -3299,6 +3299,14 @@ void MAPPER_BindKeys(Section* sec)
 		button->BindColor();
 	}
 
+	// Test hook: DOSBOX_MAPPER_DUMP names a file to write the bindings in
+	// force to, the way the mapper UI saves them (for making mapper files
+	// where the UI can't run, such as on iOS)
+	if (const auto dump_path = std::getenv("DOSBOX_MAPPER_DUMP")) {
+		mapper.filename = dump_path;
+		MAPPER_SaveBinds();
+	}
+
 	if (SDL_GetModState() & SDL_KMOD_CAPS) {
 		MAPPER_TriggerEvent(caps_lock_event, false);
 	}

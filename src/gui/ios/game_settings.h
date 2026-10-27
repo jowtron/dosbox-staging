@@ -58,9 +58,11 @@ NSString* GamepadButtonLabel(int action);
 
 // A screen that edits a game's settings, to be shown in a navigation
 // controller. The name can only be changed if 'on_rename' is given (not while
-// the game is running); it's called with the game's new name.
+// the game is running); it's called with the game's new name. With 'on_play'
+// the screen has a Play button, which calls it with the game's name.
 UIViewController* MakeGameSettingsController(NSString* game, NSString* conf_path,
-                                             void (^on_rename)(NSString* new_name));
+                                             void (^on_rename)(NSString* new_name),
+                                             void (^on_play)(NSString* name));
 
 // The same screen for the settings every game starts from, in the shared
 // dosbox.conf
