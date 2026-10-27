@@ -17,4 +17,7 @@ void IOS_InstallTouchOverlay(SDL_Window* window);
 // the emulator)
 void IOS_RemoveTouchOverlay();
 
+// Whether a hardware keyboard is attached (or DOSPAD_KEYBOARD=1 says so)
+bool IOS_KeyboardAttached();
+
 #endif // DOSBOX_IOS_TOUCH_OVERLAY_H

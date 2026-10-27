@@ -5,6 +5,9 @@
 
 #include "dosbox.h"
 
+#include "config/config.h"
+#include "config/setup.h"
+#include "gui/ios/game_import.h"
 #include "gui/ios/game_settings.h"
 #include "gui/ios/library.h"
 
@@ -12,6 +15,7 @@
 #include "hardware/memory.h"
 #include "ints/bios.h"
 
+#import <GameController/GameController.h>
 #import <UIKit/UIKit.h>
 
 #include <algorithm>
@@ -1862,6 +1866,63 @@ void draw_circle(const CGPoint centre, const CGFloat radius, UIColor* fill)
 
 static DBTouchOverlay* overlay = nil;
 
+bool IOS_KeyboardAttached()
+{
+	return GCKeyboard.coalescedKeyboard != nil || std::getenv("DOSPAD_KEYBOARD");
+}
+
+// The mapper file the game's config asks for, if any (the Keyboard setting)
+static NSString* conf_mapperfile()
+{
+	NSString* const conf = CurrentGameConfPath();
+	return (conf ? ReadConfValue(conf, @"sdl", @"mapperfile") : nil)
+	        ?: ReadConfValue(@"dosbox.conf", @"sdl", @"mapperfile");
+}
+
+// The Keyboard setting is for an attached keyboard; it would turn the
+// on-screen keyboard's letters into numpad keys too, so the mapping follows
+// the keyboard: on while one is attached, off otherwise. The library sets
+// the starting state (IOS_ChooseGame); this handles a keyboard arriving or
+// leaving during a game, the way 'config -set' changes a setting
+static void follow_keyboard(const bool attached)
+{
+	NSString* const wanted = conf_mapperfile();
+	if (!overlay || !wanted || !control) {
+		return;
+	}
+	auto section = static_cast<SectionProp*>(control->GetSection("sdl"));
+	auto property = section ? section->GetProperty("mapperfile") : nullptr;
+	if (!property) {
+		return;
+	}
+	const std::string value = attached ? wanted.UTF8String : "";
+	LOG_MSG("DOSPAD: Keyboard %s, mapper file '%s'",
+	        attached ? "attached" : "detached",
+	        value.c_str());
+	property->SetValue(value);
+	section->ExecuteUpdate(*property);
+}
+
+static void watch_keyboard()
+{
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		auto center = NSNotificationCenter.defaultCenter;
+		[center addObserverForName:GCKeyboardDidConnectNotification
+		                    object:nil
+		                     queue:NSOperationQueue.mainQueue
+		                usingBlock:^(NSNotification*) {
+			                follow_keyboard(true);
+		                }];
+		[center addObserverForName:GCKeyboardDidDisconnectNotification
+		                    object:nil
+		                     queue:NSOperationQueue.mainQueue
+		                usingBlock:^(NSNotification*) {
+			                follow_keyboard(IOS_KeyboardAttached());
+		                }];
+	});
+}
+
 void IOS_RemoveTouchOverlay()
 {
 	[overlay shutDown];
@@ -1872,6 +1933,8 @@ void IOS_RemoveTouchOverlay()
 void IOS_InstallTouchOverlay(SDL_Window* window)
 {
 	sdl_window = window;
+	watch_keyboard();
+	LOG_MSG("DOSPAD: Keyboard %s at start", IOS_KeyboardAttached() ? "attached" : "not attached");
 
 	// A game being watched rather than touched mustn't lock the screen
 	UIApplication.sharedApplication.idleTimerDisabled = YES;

@@ -6,11 +6,11 @@
 #include "gui/ios/game_icons.h"
 #include "gui/ios/game_import.h"
 #include "gui/ios/game_settings.h"
+#include "gui/ios/touch_overlay.h"
 #include "gui/ios/windows_display.h"
 
 #include "dosbox.h"
 
-#import <GameController/GameController.h>
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -854,8 +854,9 @@ std::vector<std::string> IOS_ChooseGame(const std::string& program_path)
 	args.insert(args.end(), {"--set", PresentationSetting()});
 	// A game's Keyboard setting remaps keys for an attached keyboard; it
 	// would catch the on-screen keyboard's keys too, so without one the
-	// mapper keeps its defaults. Test hook: DOSPAD_KEYBOARD=1 counts as one.
-	if (!GCKeyboard.coalescedKeyboard && !std::getenv("DOSPAD_KEYBOARD")) {
+	// mapper starts with its defaults (the overlay follows the keyboard
+	// from there)
+	if (!IOS_KeyboardAttached()) {
 		args.insert(args.end(), {"--set", "sdl mapperfile="});
 	}
 	return args;

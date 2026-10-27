@@ -241,8 +241,8 @@ const std::vector<ConfSetting>& conf_settings()
 	           @"numpad-789-uio-jkl.map",
 	           @"For an attached keyboard",
 	           @"On an attached keyboard, 7 8 9, U I O and J K L act as the numpad's block of "
-	           @"nine, for games that move with the numpad; they no longer type. Without a "
-	           @"keyboard attached at launch, every key is itself."}},
+	           @"nine, for games that move with the numpad; they no longer type. While no "
+	           @"keyboard is attached, every key is itself."}},
 	         @"Staging's default: every key is itself."},
 	};
 	return settings;
