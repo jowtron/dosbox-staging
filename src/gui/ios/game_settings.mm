@@ -140,6 +140,8 @@ struct Choice {
 	NSString* subtitle = nil;
 	// The explanation under the setting's row while this is the choice
 	NSString* detail = nil;
+	// A mark beside the title in the menu
+	UIImage* image = nil;
 };
 
 struct ConfSetting {
@@ -640,6 +642,20 @@ NSArray<NSString*>* whole_pixel_sizes()
 	return sizes;
 }
 
+// A size's mark in the menu: green where Auto CRT's shader fills the screen
+// with even scanlines, orange where it bands, none otherwise
+UIImage* size_image(NSString* size, NSString* conf_path)
+{
+	const auto advice = scanline_advice(size, conf_path);
+	if (advice.pixels_per_line <= 0 || !advice.auto_shader) {
+		return nil;
+	}
+	if (!advice.even) {
+		return fit_image(ShaderFit::Bands);
+	}
+	return advice.bars_percent > 0 ? nil : fit_image(ShaderFit::Even);
+}
+
 ConfSetting screen_size_setting(NSString* conf_path)
 {
 	const auto fit  = fit_screen_size();
@@ -647,7 +663,8 @@ ConfSetting screen_size_setting(NSString* conf_path)
 	setting.choices = {{[NSString stringWithFormat:@"Fit the screen (%@, %@)", fit, aspect_ratio(fit)],
 	                    fit,
 	                    size_subtitle(fit, conf_path),
-	                    size_detail(fit, conf_path)}};
+	                    size_detail(fit, conf_path),
+	                    size_image(fit, conf_path)}};
 
 	auto sizes = [NSMutableOrderedSet<NSString*> orderedSetWithArray:whole_pixel_sizes()];
 	[sizes addObjectsFromArray:@[@"1280x960", @"1024x768", @"800x600", @"640x480"]];
@@ -662,7 +679,8 @@ ConfSetting screen_size_setting(NSString* conf_path)
 		setting.choices.push_back({[NSString stringWithFormat:@"%@ (%@)", size, aspect_ratio(size)],
 		                           size,
 		                           size_subtitle(size, conf_path),
-		                           size_detail(size, conf_path)});
+		                           size_detail(size, conf_path),
+		                           size_image(size, conf_path)});
 	}
 	return setting;
 }
@@ -1917,7 +1935,8 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 		choices.push_back({ratio ? [NSString stringWithFormat:@"%@ (%@)", current, ratio] : current,
 		                   current,
 		                   is_size ? size_subtitle(current, _conf_path) : nil,
-		                   is_size ? size_detail(current, _conf_path) : nil});
+		                   is_size ? size_detail(current, _conf_path) : nil,
+		                   is_size ? size_image(current, _conf_path) : nil});
 	}
 
 	auto actions = [NSMutableArray<UIMenuElement*> array];
@@ -1941,6 +1960,7 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 		                                       : [value isEqualToString:current];
 		action.state    = is_current ? UIMenuElementStateOn : UIMenuElementStateOff;
 		action.subtitle = choice.subtitle;
+		action.image    = choice.image;
 		[actions addObject:action];
 	}
 	return make_menu_button([UIMenu menuWithChildren:actions]);
