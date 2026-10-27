@@ -500,27 +500,36 @@ NSString* size_detail(NSString* size, NSString* conf_path)
 }
 
 // A shader's note in the Shader menu, for a game with a Windows screen size
-NSString* shader_subtitle(NSString* shader_name, NSString* windows_size, NSString* conf_path)
+// How a CRT shader fits a Windows game's screen size
+enum class ShaderFit { Unknown, Even, Bands, TooFewLines };
+
+struct ShaderNote {
+	NSString* subtitle = nil;
+	ShaderFit fit      = ShaderFit::Unknown;
+};
+
+ShaderNote shader_note(NSString* shader_name, NSString* windows_size, NSString* conf_path)
 {
 	if (!windows_size) {
-		return nil;
+		return {};
 	}
 	if ([shader_name isEqualToString:@"crt/vga-1080p-fake-double-scan"]) {
-		return @"For 320x200 games";
+		return {@"For 320x200 games"};
 	}
 	const auto advice = scanline_advice(windows_size, conf_path);
 	if (advice.pixels_per_line <= 0) {
-		return nil;
+		return {};
 	}
 	NSString* const pixels = pixels_text(advice.pixels_per_line);
 	if ([shader_name isEqualToString:@"crt-auto"]) {
 		if (!advice.auto_shader) {
-			return [NSString stringWithFormat:@"Sharp pixels at %@", windows_size];
+			return {[NSString stringWithFormat:@"Sharp pixels at %@", windows_size]};
 		}
-		return [NSString stringWithFormat:@"%@ at %@, %@",
-		                                  advice.auto_shader,
-		                                  windows_size,
-		                                  advice.even ? @"even" : @"bands"];
+		return {[NSString stringWithFormat:@"%@ at %@, %@",
+		                                   advice.auto_shader,
+		                                   windows_size,
+		                                   advice.even ? @"even" : @"bands"],
+		        advice.even ? ShaderFit::Even : ShaderFit::Bands};
 	}
 	// The preset names say how many pixels per line they were made for
 	const auto needed = [&] {
@@ -536,19 +545,46 @@ NSString* shader_subtitle(NSString* shader_name, NSString* windows_size, NSStrin
 		return 0;
 	}();
 	if (needed == 0) {
-		return nil;
+		return {};
 	}
 	const auto is_vga_1080p = [shader_name isEqualToString:@"crt/vga-1080p"];
 	if (advice.pixels_per_line < needed) {
-		return [NSString stringWithFormat:@"Needs %d px per line, has %@", needed, pixels];
+		return {[NSString stringWithFormat:@"Needs %d px per line, has %@", needed, pixels],
+		        ShaderFit::TooFewLines};
 	}
 	if (!even_scanlines(advice.scale, is_vga_1080p)) {
-		return [NSString stringWithFormat:@"Bands at %@ px per line", pixels];
+		return {[NSString stringWithFormat:@"Bands at %@ px per line", pixels], ShaderFit::Bands};
 	}
 	if (advice.bars_percent > 0) {
-		return [NSString stringWithFormat:@"Even at %@, %d%% bars", windows_size, advice.bars_percent];
+		return {[NSString stringWithFormat:@"Even at %@, %d%% bars", windows_size, advice.bars_percent],
+		        ShaderFit::Even};
 	}
-	return [NSString stringWithFormat:@"Even at %@", windows_size];
+	return {[NSString stringWithFormat:@"Even at %@", windows_size], ShaderFit::Even};
+}
+
+// A menu mark for the fit: green for even scanlines, orange for banding,
+// grey when the size has too few lines for the shader
+UIImage* fit_image(const ShaderFit fit)
+{
+	NSString* name = nil;
+	UIColor* color = nil;
+	switch (fit) {
+	case ShaderFit::Even:
+		name  = @"checkmark.seal.fill";
+		color = UIColor.systemGreenColor;
+		break;
+	case ShaderFit::Bands:
+		name  = @"exclamationmark.triangle.fill";
+		color = UIColor.systemOrangeColor;
+		break;
+	case ShaderFit::TooFewLines:
+		name  = @"minus.circle.fill";
+		color = UIColor.systemGrayColor;
+		break;
+	case ShaderFit::Unknown: return nil;
+	}
+	return [[UIImage systemImageNamed:name] imageWithTintColor:color
+	                                             renderingMode:UIImageRenderingModeAlwaysOriginal];
 }
 
 // A size's aspect ratio: the familiar form, such as 4:3, when there is one
@@ -1830,7 +1866,7 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 	        _windows_dir ? (ReadConfValue(_conf_path, @"dosbox", @"vesa_custom_resolution")
 	                                ?: ReadConfValue(@"dosbox.conf", @"dosbox", @"vesa_custom_resolution"))
 	                     : nil;
-	NSString* const note = shader_subtitle(shader, windows_size, _conf_path);
+	NSString* const note = shader_note(shader, windows_size, _conf_path).subtitle;
 	if (what && note) {
 		return [NSString stringWithFormat:@"%@ %@.", what, note];
 	}
@@ -1935,7 +1971,9 @@ constexpr NSInteger ControlsRowCount = FirstButtonRow + GamepadButtonCount;
 		auto action = make_action(title,
 		                          !is_sharp && [shader caseInsensitiveCompare:name] == NSOrderedSame,
 		                          choose(GpuOutput, name));
-		action.subtitle = shader_subtitle(name, windows_size, conf_path);
+		const auto note = shader_note(name, windows_size, conf_path);
+		action.subtitle = note.subtitle;
+		action.image    = fit_image(note.fit);
 		return action;
 	};
 	const auto submenu = ^(NSString* title, NSArray<UIMenuElement*>* children) {
